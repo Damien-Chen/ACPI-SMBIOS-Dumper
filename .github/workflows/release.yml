@@ -39,9 +39,33 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: acpi-smbios-dumper
+          path: .
+
+      - name: Prepare release name
+        id: prep
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          RELEASE_NAME="ACPI-SMBIOS-Dumper-${TAG}"
+          echo "name=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+          echo "Computed release name: ${RELEASE_NAME}"
+
+      - name: Ensure binary at workspace root
+        run: |
+          if [ -f acpi-smbios-dumper/acpi-smbios-dumper.exe ]; then
+            mv acpi-smbios-dumper/acpi-smbios-dumper.exe .
+          fi
+          if [ -f acpi-smbios-dumper.exe ]; then
+            echo "Binary ready:"
+            ls -la acpi-smbios-dumper.exe
+          else
+            echo "Error: binary not found after download" >&2
+            ls -la
+            exit 1
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ steps.prep.outputs.name }}
           files: acpi-smbios-dumper.exe
           generate_release_notes: true
