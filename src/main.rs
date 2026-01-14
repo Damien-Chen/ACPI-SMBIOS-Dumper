@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod api;
 mod parsers;
 mod cli;
@@ -5,8 +7,12 @@ mod gui;
 
 use clap::Parser;
 use windows::Win32::UI::Shell::IsUserAnAdmin;
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 
 fn main() {
+    // Try to attach to parent console so we can still print to CLI
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+
     let args = cli::Args::parse();
 
     // Check Admin

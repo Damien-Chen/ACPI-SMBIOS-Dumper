@@ -27,8 +27,8 @@ enum Selection {
 }
 
 struct DumpApp {
-    acpi_tables: Vec<String>,
-    smbios_data: Vec<u8>,
+    acpi_tables: Option<Vec<String>>, // Changed to Option
+    smbios_data: Option<Vec<u8>>,     // Changed to Option
     smbios_list: Vec<(usize, u8, u8, u16, String)>, // offset, type, length, handle, label
     
     selected_item: Selection,
@@ -41,8 +41,23 @@ struct DumpApp {
 
 impl DumpApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // Load data on startup
-        let acpi_tables = api::enum_system_firmware_tables(api::SIG_ACPI).unwrap_or_default();
+        // Initialize with empty/None
+        Self {
+            acpi_tables: None,
+            smbios_data: None,
+            smbios_list: Vec::new(),
+            selected_item: Selection::None,
+            active_tab: Tab::Hex,
+            cached_hex: String::new(),
+            cached_parsed: String::new(),
+        }
+    }
+
+    fn load_acpi(&mut self) {
+        self.acpi_tables = Some(api::enum_system_firmware_tables(api::SIG_ACPI).unwrap_or_default());
+    }
+
+    fn load_smbios(&mut self) {
         let smbios_data = api::get_smbios_data().unwrap_or_default();
         
         let mut smbios_list = Vec::new();
@@ -73,16 +88,8 @@ impl DumpApp {
                  }
              }
         }
-
-        Self {
-            acpi_tables,
-            smbios_data,
-            smbios_list,
-            selected_item: Selection::None,
-            active_tab: Tab::Hex,
-            cached_hex: String::new(),
-            cached_parsed: String::new(),
-        }
+        self.smbios_data = Some(smbios_data);
+        self.smbios_list = smbios_list;
     }
 
     fn select_acpi(&mut self, signature: String) {
@@ -96,18 +103,16 @@ impl DumpApp {
         }
     }
 
-    fn select_smbios(&mut self, offset: usize, type_id: u8, length: u8, handle: u16) {
-        self.selected_item = Selection::Smbios(offset, type_id, length, handle);
+    fn select_smbios(&mut self, offset: usize, type_id: u8, _length: u8, handle: u16) {
+        self.selected_item = Selection::Smbios(offset, type_id, 0, handle);
         // Extract chunk
-        let end = offset + length as usize; // This is just the formatted part? No, structure goes until double null.
-        // Wait, for hex dump usually we want the whole structure including strings.
-        // `parsers::parse_smbios_structure` returns next_offset which is the end of the whole structure.
-        // I need to re-parse to find the end or store it.
-        // For simplicity, let's re-parse to find end.
-        if let Ok((_, next_off)) = parsers::parse_smbios_structure(&self.smbios_data, offset) {
-             // Clone data to release borrow on self.smbios_data before calling methods that borrow self mutably
-             let data_vec = self.smbios_data[offset..next_off].to_vec();
-             self.update_cache(&data_vec, "SMBIOS", &format!("Type {}", type_id));
+        if let Some(ref data) = self.smbios_data {
+             // For simplicity, let's re-parse to find end.
+            if let Ok((_, next_off)) = parsers::parse_smbios_structure(data, offset) {
+                 // Clone data to release borrow on self.smbios_data before calling methods that borrow self mutably
+                 let data_vec = data[offset..next_off].to_vec();
+                 self.update_cache(&data_vec, "SMBIOS", &format!("Type {}", type_id));
+            }
         }
     }
 
@@ -191,35 +196,47 @@ impl eframe::App for DumpApp {
                          egui::CollapsingHeader::new("ACPI Tables")
                              .default_open(true)
                              .show(ui, |ui| {
-                                 let mut clicked_acpi = None;
-                                 for t in &self.acpi_tables {
-                                     if ui.selectable_label(match &self.selected_item {
-                                         Selection::Acpi(s) => s == t,
-                                         _ => false
-                                     }, t).clicked() {
-                                         clicked_acpi = Some(t.clone());
+                                 if let Some(tables) = &self.acpi_tables {
+                                     let mut clicked_acpi = None;
+                                     for t in tables {
+                                         if ui.selectable_label(match &self.selected_item {
+                                             Selection::Acpi(s) => s == t,
+                                             _ => false
+                                         }, t).clicked() {
+                                             clicked_acpi = Some(t.clone());
+                                         }
                                      }
-                                 }
-                                 if let Some(t) = clicked_acpi {
-                                     self.select_acpi(t);
+                                     if let Some(t) = clicked_acpi {
+                                         self.select_acpi(t);
+                                     }
+                                 } else {
+                                     if ui.button("Load ACPI Tables").clicked() {
+                                         self.load_acpi();
+                                     }
                                  }
                              });
 
                          egui::CollapsingHeader::new("SMBIOS Data")
                              .default_open(true)
                              .show(ui, |ui| {
-                                 let mut clicked_smbios = None;
-                                 for (offset, type_id, length, handle, label) in &self.smbios_list {
-                                      let is_selected = match &self.selected_item {
-                                          Selection::Smbios(off, _, _, _) => *off == *offset,
-                                          _ => false
-                                      };
-                                      if ui.selectable_label(is_selected, label).clicked() {
-                                          clicked_smbios = Some((*offset, *type_id, *length, *handle));
-                                      }
-                                 }
-                                 if let Some((off, tid, len, hdl)) = clicked_smbios {
-                                      self.select_smbios(off, tid, len, hdl);
+                                 if self.smbios_data.is_some() {
+                                     let mut clicked_smbios = None;
+                                     for (offset, type_id, length, handle, label) in &self.smbios_list {
+                                          let is_selected = match &self.selected_item {
+                                              Selection::Smbios(off, _, _, _) => *off == *offset,
+                                              _ => false
+                                          };
+                                          if ui.selectable_label(is_selected, label).clicked() {
+                                              clicked_smbios = Some((*offset, *type_id, *length, *handle));
+                                          }
+                                     }
+                                     if let Some((off, tid, len, hdl)) = clicked_smbios {
+                                          self.select_smbios(off, tid, len, hdl);
+                                     }
+                                 } else {
+                                     if ui.button("Load SMBIOS Data").clicked() {
+                                         self.load_smbios();
+                                     }
                                  }
                              });
                      });
