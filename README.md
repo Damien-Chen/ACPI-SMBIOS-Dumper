@@ -1,31 +1,31 @@
-# ACPI & SMBIOS Dumper Tool
+# ACPI & SMBIOS Dumper
 
-A Windows-based utility for inspecting ACPI tables and SMBIOS data. This tool provides both a Command Line Interface (CLI) and a Graphical User Interface (GUI) to easily dump and view system firmware information.
+A Windows-based utility for inspecting ACPI tables and SMBIOS data. Built with Rust for performance and portability. This tool provides both a Command Line Interface (CLI) and a Graphical User Interface (GUI).
 
 ## Features
 
 -   **ACPI Tables**: List all available ACPI tables and dump specific tables by signature (e.g., FACP, DSDT).
 -   **SMBIOS Data**: Parse and display SMBIOS structures (Type 0, 1, 2, 3, 4, 17, and more).
 -   **Hex & ASCII View**: Detailed hex dump views for analysis.
--   **GUI Mode**: specific user-friendly interface built with PyQt6.
--   **Rich CLI**: Colored and formatted output in the terminal (requires `rich`).
+-   **GUI Mode**: Fast, native interface built with `egui`.
+-   **CLI Mode**: Rich output in the terminal.
 
 ## Prerequisites
 
--   **Operating System**: Windows 10/11 (x64 recommended).
--   **Python**: Python 3.8 or newer.
+-   **Operating System**: Windows 10/11 (x64).
 -   **Privileges**: **Administrator privileges are REQUIRED** to access firmware tables via Windows APIs.
 
-## Installation
+## Build Instructions
 
-1.  Clone or download this repository.
-2.  Install the required dependencies:
+1.  Install Rust (if not already installed): https://rustup.rs/
+2.  Clone this repository.
+3.  Build the project:
 
     ```bash
-    pip install -r requirements.txt
+    cargo build --release
     ```
 
-    *Note: `rich` is used for pretty CLI output, and `PyQt6` is required for the GUI.*
+    The binary will be located at `target/release/acpi-smbios-dumper.exe`.
 
 ## Usage
 
@@ -33,34 +33,32 @@ A Windows-based utility for inspecting ACPI tables and SMBIOS data. This tool pr
 
 ### Command Line Interface (CLI)
 
-Run `cli_main.py` with the following arguments:
-
 #### List ACPI Tables
 Lists all ACPI tables found on the system.
 ```bash
-python cli_main.py --acpi
+acpi-smbios-dumper.exe --acpi
 ```
 
 #### Dump a Specific ACPI Table
 Dumps the content of a specific table (e.g., `FACP`).
 ```bash
-python cli_main.py --table FACP
+acpi-smbios-dumper.exe --table FACP
 ```
 
 #### Dump SMBIOS Data
 Parses and displays SMBIOS structures.
 ```bash
-python cli_main.py --smbios
+acpi-smbios-dumper.exe --smbios
 ```
 
 ### Graphical User Interface (GUI)
 
 Launch the GUI to browse tables interactively.
 ```bash
-python cli_main.py --gui
+acpi-smbios-dumper.exe --gui
 ```
 
 ## Troubleshooting
 
--   **"Access Denied" or Empty Lists**: Ensure you are running the command prompt as **Administrator**. The Windows API `EnumSystemFirmwareTables` returns zero if the process lacks sufficient privileges.
--   **"Module not found" errors**: Make sure you have installed `requirements.txt`.
+-   **"Access Denied" or Empty Lists**: Ensure you are running as **Administrator**.
+-   **Build Errors**: Ensure you have the MSVC build tools installed (usually comes with Rust on Windows).
