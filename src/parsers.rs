@@ -1,17 +1,16 @@
 use byteorder::{ByteOrder, LittleEndian};
-use std::fmt;
 
 #[derive(Debug)]
 pub struct AcpiTableHeader {
     pub signature: String,
     pub length: u32,
-    pub revision: u8,
-    pub checksum: u8,
+    pub _revision: u8,
+    pub _checksum: u8,
     pub oem_id: String,
     pub oem_table_id: String,
-    pub oem_revision: u32,
-    pub creator_id: String,
-    pub creator_revision: u32,
+    pub _oem_revision: u32,
+    pub _creator_id: String,
+    pub _creator_revision: u32,
 }
 
 pub fn parse_acpi_header(data: &[u8]) -> Result<AcpiTableHeader, String> {
@@ -32,13 +31,13 @@ pub fn parse_acpi_header(data: &[u8]) -> Result<AcpiTableHeader, String> {
     Ok(AcpiTableHeader {
         signature,
         length,
-        revision,
-        checksum,
+        _revision: revision,
+        _checksum: checksum,
         oem_id,
         oem_table_id,
-        oem_revision,
-        creator_id,
-        creator_revision,
+        _oem_revision: oem_revision,
+        _creator_id: creator_id,
+        _creator_revision: creator_revision,
     })
 }
 
@@ -180,14 +179,18 @@ pub fn get_string_by_index(strings: &[String], index: u8) -> String {
 
 // SMBIOS Parsers
 
-pub fn parse_smbios_details(type_id: u8, data: &[u8], offset: usize, header_len: u8, strings: &[String]) -> Option<Vec<(String, String)>> {
+pub fn parse_smbios_details(type_id: u8, data: &[u8], offset: usize, _header_len: u8, strings: &[String]) -> Option<Vec<(String, String)>> {
     match type_id {
         0 => Some(parse_type_0(data, offset, strings)),
         1 => Some(parse_type_1(data, offset, strings)),
         2 => Some(parse_type_2(data, offset, strings)),
         3 => Some(parse_type_3(data, offset, strings)),
         4 => Some(parse_type_4(data, offset, strings)),
+        7 => Some(parse_type_7(data, offset, strings)),
+        9 => Some(parse_type_9(data, offset, strings)),
+        11 => Some(parse_type_11(data, offset, strings)),
         17 => Some(parse_type_17(data, offset, strings)),
+        32 => Some(parse_type_32(data, offset, strings)),
         _ => None,
     }
 }
@@ -344,3 +347,88 @@ fn parse_type_17(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String,
     }
     info
 }
+
+fn parse_type_7(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x0F < data.len() {
+        let sock_idx = data[offset + 0x04];
+        let cfg = LittleEndian::read_u16(&data[offset + 0x05..offset + 0x07]);
+        let max_size = LittleEndian::read_u16(&data[offset + 0x07..offset + 0x09]);
+        let inst_size = LittleEndian::read_u16(&data[offset + 0x09..offset + 0x0B]);
+        let speed = data[offset + 0x0F];
+
+        info.push(("Socket Designator".to_string(), get_string_by_index(strings, sock_idx)));
+        info.push(("Configuration".to_string(), format!("0x{:04X}", cfg)));
+        
+        // Size parsing (bit 15 is granularity: 0=1KB, 1=64KB)
+        let parse_size = |s: u16| {
+            if s == 0 { return "None".to_string(); }
+            let val = s & 0x7FFF;
+            if s & 0x8000 != 0 { format!("{} KB", val * 64) } else { format!("{} KB", val) }
+        };
+
+        info.push(("Maximum Cache Size".to_string(), parse_size(max_size)));
+        info.push(("Installed Size".to_string(), parse_size(inst_size)));
+        info.push(("Speed".to_string(), if speed != 0 { format!("{} ns", speed) } else { "Unknown".to_string() }));
+        
+        if offset + 0x12 < data.len() {
+            let err_corr = data[offset + 0x10];
+            let sys_type = data[offset + 0x11];
+            let assoc = data[offset + 0x12];
+            info.push(("Error Correction".to_string(), format!("0x{:02X}", err_corr)));
+            info.push(("System Cache Type".to_string(), format!("0x{:02X}", sys_type)));
+            info.push(("Associativity".to_string(), format!("0x{:02X}", assoc)));
+        }
+    }
+    info
+}
+
+fn parse_type_9(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x09 < data.len() {
+        let name_idx = data[offset + 0x04];
+        let slot_type = data[offset + 0x05];
+        let bus_width = data[offset + 0x06];
+        let usage = data[offset + 0x07];
+        let len = data[offset + 0x08];
+        let id = LittleEndian::read_u16(&data[offset + 0x09..offset + 0x0B]);
+
+        info.push(("Slot Designator".to_string(), get_string_by_index(strings, name_idx)));
+        info.push(("Slot Type".to_string(), format!("0x{:02X}", slot_type)));
+        info.push(("Data Bus Width".to_string(), format!("0x{:02X}", bus_width)));
+        info.push(("Current Usage".to_string(), format!("0x{:02X}", usage)));
+        info.push(("Slot Length".to_string(), format!("0x{:02X}", len)));
+        info.push(("Slot ID".to_string(), format!("0x{:04X}", id)));
+    }
+    info
+}
+
+fn parse_type_11(_data: &[u8], _offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    for (i, s) in strings.iter().enumerate() {
+        info.push((format!("String {}", i + 1), s.clone()));
+    }
+    info
+}
+
+fn parse_type_32(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x0A < data.len() {
+        let status = data[offset + 0x0A]; // Status is at 0x0A, header is 0x04..0x0A
+        info.push(("Boot Status".to_string(), format!("0x{:02X}", status)));
+        
+        let status_msg = match status {
+            0 => "No errors detected",
+            1 => "No bootable media",
+            2 => "Normal boot",
+            3 => "User-requested boot",
+            4 => "System-requested boot",
+            5 => "Kernel panic",
+            6 => "Recovery mode",
+            _ => "Other / Unknown",
+        };
+        info.push(("Status Description".to_string(), status_msg.to_string()));
+    }
+    info
+}
+

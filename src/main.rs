@@ -11,7 +11,7 @@ use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 
 fn main() {
     // Try to attach to parent console so we can still print to CLI
-    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    unsafe { let _ = AttachConsole(ATTACH_PARENT_PROCESS); };
 
     let args = cli::Args::parse();
 
