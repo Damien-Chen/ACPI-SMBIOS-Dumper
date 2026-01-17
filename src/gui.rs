@@ -3,11 +3,15 @@ use crate::api;
 use crate::parsers;
 use std::io::Write;
 
+/// Entry point for launching the GUI version of the BIOS Dump Tool.
+///
+/// Sets up window options, loads the application icon, and starts the `eframe` event loop.
+///
+/// # Returns
+/// `Result<(), eframe::Error>`
 pub fn run() -> Result<(), eframe::Error> {
     // Load icon for the taskbar/window
-    let icon_data = include_bytes!("../assets/icon.ico"); // We can try to decode from ICO or use the original JPG
-    // However, ICO might be complex to decode. If you have the original JPG, that's easier.
-    // Let's use include_bytes! with the image we have.
+    let icon_data = include_bytes!("../assets/icon.ico");
     
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
@@ -32,46 +36,65 @@ pub fn run() -> Result<(), eframe::Error> {
     )
 }
 
+/// Represents the two viewing modes for table data.
 #[derive(PartialEq)]
 enum Tab {
+    /// Raw hexadecimal representation.
     Hex,
+    /// Human-readable interpreted representation.
     Parsed,
 }
 
+/// Tracks the currently selected item in the sidebar.
 enum Selection {
+    /// Nothing is selected.
     None,
-    Acpi(String), // signature
-    Smbios(usize, u8), // offset, type_id
+    /// An ACPI table is selected.
+    Acpi(api::AcpiTableInfo),
+    /// An SMBIOS structure is selected (offset, type_id).
+    Smbios(usize, u8),
 }
 
 #[allow(dead_code)]
 impl Selection {
+    /// Returns true if no item is selected.
     fn is_none(&self) -> bool {
         matches!(self, Selection::None)
     }
 }
 
+/// The main application state for the egui interface.
+///
+/// Manages discovered tables, UI state (selections, tabs, filters), and cached data views.
 struct DumpApp {
-    acpi_tables: Option<Vec<String>>, // Changed to Option
-    smbios_data: Option<Vec<u8>>,     // Changed to Option
+    /// List of discovered ACPI tables.
+    acpi_tables: Option<Vec<api::AcpiTableInfo>>,
+    /// Raw SMBIOS data buffer.
+    smbios_data: Option<Vec<u8>>,
+    /// List of parsed SMBIOS structures for the sidebar.
     smbios_list: Vec<(usize, u8, u8, u16, String)>, // offset, type, length, handle, label
     
+    /// The currently selected table or structure.
     selected_item: Selection,
+    /// The active view tab (Hex or Parsed).
     active_tab: Tab,
     
-    // Cache for right panel content
+    /// Cached hex dump string of the selected item.
     cached_hex: String,
+    /// Cached parsed/interpreted string of the selected item.
     cached_parsed: String,
 
-    // Search & Filter state
+    /// Text used to filter the sidebar table list.
     sidebar_filter: String,
+    /// Text for searching within the current data view.
     search_query: String,
+    /// Whether the search panel (Ctrl+F) is currently visible.
     search_panel_open: bool,
 }
 
 impl DumpApp {
+    /// Creates a new instance of the application with default state.
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // Initialize with empty/None
         Self {
             acpi_tables: None,
             smbios_data: None,
@@ -86,17 +109,19 @@ impl DumpApp {
         }
     }
 
+    /// Triggers the combined discovery of ACPI tables and updates the state.
     fn load_acpi(&mut self) {
-        self.acpi_tables = Some(api::enum_system_firmware_tables(api::SIG_ACPI).unwrap_or_default());
+        self.acpi_tables = Some(api::load_acpi_tables_combined());
     }
 
+    /// Triggers the retrieval and parsing of SMBIOS data and updates the state.
     fn load_smbios(&mut self) {
         let smbios_data = api::get_smbios_data().unwrap_or_default();
         
         let mut smbios_list = Vec::new();
         if !smbios_data.is_empty() {
              let (start_offset, _) = parsers::parse_raw_smbios_data_header(&smbios_data)
-                 .map(|(_, off)| (off, 0)) // We don't need header details here
+                 .map(|(_, off)| (off, 0))
                  .unwrap_or((0, 0));
                  
              let mut current_off = start_offset;
@@ -110,8 +135,8 @@ impl DumpApp {
                         32 => "Boot Info", _ => ""
                      };
                      if !type_name.is_empty() {
-                         label.push_str(" - ");
-                         label.push_str(type_name);
+                          label.push_str(" - ");
+                          label.push_str(type_name);
                      }
                      
                      smbios_list.push((current_off, header.type_id, header.length, header.handle, label));
@@ -127,30 +152,37 @@ impl DumpApp {
         self.smbios_list = smbios_list;
     }
 
-    fn select_acpi(&mut self, signature: String) {
-        self.selected_item = Selection::Acpi(signature.clone());
-        // Fetch data
-        if let Ok(data) = api::get_system_firmware_table(api::SIG_ACPI, &signature) {
-             self.update_cache(&data, "ACPI", &signature);
+    /// Handles the selection of an ACPI table and updates the detail views.
+    fn select_acpi(&mut self, info: api::AcpiTableInfo) {
+        self.selected_item = Selection::Acpi(info.clone());
+        
+        let result = if let Some(ref path) = info.registry_path {
+            api::get_acpi_table_by_path(path)
         } else {
-             self.cached_hex = "Error fetching table".to_string();
-             self.cached_parsed = "Error fetching table".to_string();
+            api::get_system_firmware_table(api::SIG_ACPI, &info.signature)
+        };
+
+        match result {
+            Ok(data) => self.update_cache(&data, "ACPI", &info.signature),
+            Err(e) => {
+                self.cached_hex = format!("Error: {}", e);
+                self.cached_parsed = format!("Error: {}", e);
+            }
         }
     }
 
+    /// Handles the selection of an SMBIOS structure and updates the detail views.
     fn select_smbios(&mut self, offset: usize, type_id: u8) {
         self.selected_item = Selection::Smbios(offset, type_id);
-        // Extract chunk
         if let Some(ref data) = self.smbios_data {
-             // For simplicity, let's re-parse to find end.
             if let Ok((_, next_off)) = parsers::parse_smbios_structure(data, offset) {
-                 // Clone data to release borrow on self.smbios_data before calling methods that borrow self mutably
                  let data_vec = data[offset..next_off].to_vec();
                  self.update_cache(&data_vec, "SMBIOS", &format!("Type {}", type_id));
             }
         }
     }
 
+    /// Updates the internal hex and parsed text caches for the selected data block.
     fn update_cache(&mut self, data: &[u8], cat: &str, _id: &str) {
         // Hex Dump
         self.cached_hex = hex_dump_str(data);
@@ -163,17 +195,42 @@ impl DumpApp {
                   out.push_str(&format!("Length:    {}\n", header.length));
                   out.push_str(&format!("OEM ID:    {}\n", header.oem_id));
                   out.push_str(&format!("Table ID:  {}\n", header.oem_table_id));
+                  out.push_str(&format!("Revision:  {}\n", header._revision));
+                  
+                  if header.signature == "XSDT" {
+                       out.push_str("\n====================\nXSDT Entries:\n");
+                       let mut addr_map = std::collections::HashMap::new();
+                       if let Some(ref all_tables) = self.acpi_tables {
+                            if let Some(fadt_info) = all_tables.iter().find(|t| t.signature == "FACP" || t.signature == "FADT") {
+                                 let data = if let Some(ref path) = fadt_info.registry_path {
+                                      api::get_acpi_table_by_path(path).ok()
+                                 } else {
+                                      api::get_system_firmware_table(api::SIG_ACPI, &fadt_info.signature).ok()
+                                 };
+                                 
+                                 if let Some(d) = data {
+                                      let refs = parsers::parse_fadt_references(&d);
+                                      for (a, s) in refs { addr_map.insert(a, s); }
+                                 }
+                            }
+                       }
+
+                       let empty_lookup = std::collections::HashMap::new();
+                       if let Some(entries) = parsers::parse_xsdt_entries(data, &empty_lookup) {
+                            for (i, addr, _) in entries {
+                                 let label = addr_map.get(&addr).cloned();
+                                 if let Some(sig) = label {
+                                      out.push_str(&format!("Entry{:<12}0x{:016X} ({})\n", i, addr, sig));
+                                 } else {
+                                      out.push_str(&format!("Entry{:<12}0x{:016X}\n", i, addr));
+                                 }
+                            }
+                       }
+                  }
              } else {
                   out.push_str("Error parsing ACPI Header\n");
              }
         } else if cat == "SMBIOS" {
-             // We need to parse details.
-             // data is the full structure blob.
-             // parse_smbios_details expects the full blob or at least starting at offset?
-             // My parsers take `data` (full buffer usually) and `offset`. 
-             // If I pass the slice `data` (which is just the structure), offset should be 0.
-             
-             // Extract header again from slice
              if let Ok((header, _)) = parsers::parse_smbios_structure(data, 0) {
                   let strings = parsers::get_smbios_strings(data, 0, header.length);
                   
@@ -200,11 +257,18 @@ impl DumpApp {
         self.cached_parsed = out;
     }
 
+    /// Opens a save file dialog to export the currently selected item as a raw binary file.
     fn export_raw(&self) {
         let (data, default_name) = match &self.selected_item {
-            Selection::Acpi(sig) => {
-                if let Ok(data) = api::get_system_firmware_table(api::SIG_ACPI, sig) {
-                    (data, format!("{}.aml", sig))
+            Selection::Acpi(info) => {
+                let result = if let Some(ref path) = info.registry_path {
+                    api::get_acpi_table_by_path(path)
+                } else {
+                    api::get_system_firmware_table(api::SIG_ACPI, &info.signature)
+                };
+
+                if let Ok(data) = result {
+                    (data, format!("{}_{}.aml", info.signature, info.table_id.trim()))
                 } else { return; }
             }
             Selection::Smbios(off, tid) => {
@@ -226,9 +290,10 @@ impl DumpApp {
         }
     }
 
+    /// Opens a save file dialog to export the currently selected item's parsed view as a text file.
     fn export_parsed(&self) {
         let default_name = match &self.selected_item {
-            Selection::Acpi(sig) => format!("{}_parsed.txt", sig),
+            Selection::Acpi(info) => format!("{}_{}_parsed.txt", info.signature, info.table_id.trim()),
             Selection::Smbios(_, tid) => format!("smbios_type_{}_parsed.txt", tid),
             Selection::None => return,
         };
@@ -243,14 +308,21 @@ impl DumpApp {
         }
     }
 
+    /// Opens a folder picker to export all discovered ACPI tables as individual binary files.
     fn export_all_acpi(&self) {
         if let Some(tables) = &self.acpi_tables {
             if let Some(folder) = rfd::FileDialog::new()
                 .set_title("Select Folder to Export All ACPI Tables")
                 .pick_folder() {
-                for sig in tables {
-                    if let Ok(data) = api::get_system_firmware_table(api::SIG_ACPI, sig) {
-                        let path = folder.join(format!("{}.aml", sig));
+                for info in tables {
+                    let result = if let Some(ref path) = info.registry_path {
+                        api::get_acpi_table_by_path(path)
+                    } else {
+                        api::get_system_firmware_table(api::SIG_ACPI, &info.signature)
+                    };
+
+                    if let Ok(data) = result {
+                        let path = folder.join(format!("{}_{}.aml", info.signature, info.table_id.trim()));
                         if let Ok(mut file) = std::fs::File::create(path) {
                             let _ = file.write_all(&data);
                         }
@@ -260,6 +332,7 @@ impl DumpApp {
         }
     }
 
+    /// Opens a save file dialog to export the entire raw SMBIOS information blob.
     fn export_full_smbios(&self) {
         if let Some(ref data) = self.smbios_data {
              if let Some(path) = rfd::FileDialog::new()
@@ -274,6 +347,9 @@ impl DumpApp {
     }
 }
 
+/// Generates a standardized hex dump string from a byte slice.
+///
+/// Each line includes the offset, 16 hex bytes, and the corresponding ASCII representation.
 fn hex_dump_str(data: &[u8]) -> String {
     let mut out = String::new();
     let length = 16;
@@ -284,13 +360,15 @@ fn hex_dump_str(data: &[u8]) -> String {
         let ascii_part: String = chunk.iter().map(|&b| {
             if b >= 32 && b < 127 { b as char } else { '.' }
         }).collect();
-        // Align
         out.push_str(&format!("{:04X}  {:<48}  {}\n", offset, hex_str, ascii_part));
     }
     out
 }
 
 impl eframe::App for DumpApp {
+    /// Main UI loop for the application.
+    ///
+    /// Defines the sidebar (table list), central panel (data view), search panel, and top toolbar.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::left("sidebar_panel")
             .resizable(true)
@@ -326,19 +404,15 @@ impl eframe::App for DumpApp {
 
                                 let mut clicked_acpi = None;
                                 for t in tables {
-                                    if !filter.is_empty() && !t.to_lowercase().contains(&filter) {
+                                    let label = format!("{} ({})", t.signature, t.table_id.trim());
+                                    if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
                                         continue;
                                     }
-                                    if ui
-                                        .selectable_label(
-                                            match &self.selected_item {
-                                                Selection::Acpi(s) => s == t,
-                                                _ => false,
-                                            },
-                                            t,
-                                        )
-                                        .clicked()
-                                    {
+                                    let is_selected = match &self.selected_item {
+                                        Selection::Acpi(s) => s == t,
+                                        _ => false,
+                                    };
+                                    if ui.selectable_label(is_selected, &label).clicked() {
                                         clicked_acpi = Some(t.clone());
                                     }
                                 }
@@ -385,7 +459,7 @@ impl eframe::App for DumpApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Monitor for Ctrl+F
+            // Monitor for Ctrl+F keyboard shortcut
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
                 self.search_panel_open = !self.search_panel_open;
             }
@@ -424,12 +498,12 @@ impl eframe::App for DumpApp {
                         }
                         
                         if ui.toggle_value(&mut self.search_panel_open, "🔍 Search (Ctrl+F)").clicked() {
-                            // Focus can be handled if needed
                         }
                     });
                 });
                 ui.separator();
 
+                // Search Bar
                 if self.search_panel_open {
                     ui.horizontal(|ui| {
                         ui.label("Find:");
@@ -455,8 +529,9 @@ impl eframe::App for DumpApp {
                     ui.separator();
                 }
 
+                // Data Display Area
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut text = match self.active_tab {
+                    let text = match self.active_tab {
                         Tab::Hex => &mut self.cached_hex,
                         Tab::Parsed => &mut self.cached_parsed,
                     };

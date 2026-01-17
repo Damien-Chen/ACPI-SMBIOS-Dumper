@@ -1,18 +1,38 @@
 use byteorder::{ByteOrder, LittleEndian};
 
+/// Standard ACPI table header structure (36 bytes).
+///
+/// Every ACPI table begins with this common header, which contains the table signature,
+/// length, and OEM identification information.
 #[derive(Debug)]
 pub struct AcpiTableHeader {
+    /// The 4-character ASCII signature (e.g., "FACP", "APIC").
     pub signature: String,
+    /// The total length of the table, including the header.
     pub length: u32,
+    /// The revision of the table structure.
     pub _revision: u8,
+    /// The checksum of the entire table.
     pub _checksum: u8,
+    /// The OEM ID string (6 characters).
     pub oem_id: String,
+    /// The OEM Table ID string (8 characters).
     pub oem_table_id: String,
+    /// The OEM revision number.
     pub _oem_revision: u32,
+    /// The ASL compiler Vendor ID.
     pub _creator_id: String,
+    /// The ASL compiler revision number.
     pub _creator_revision: u32,
 }
 
+/// Parses a 36-byte ACPI header from a raw byte slice.
+///
+/// # Arguments
+/// * `data` - The raw byte slice containing the ACPI table.
+///
+/// # Returns
+/// A `Result` containing the parsed `AcpiTableHeader` or an error string if the data is too short.
 pub fn parse_acpi_header(data: &[u8]) -> Result<AcpiTableHeader, String> {
     if data.len() < 36 {
         return Err("Data too short for ACPI header".into());
@@ -41,20 +61,108 @@ pub fn parse_acpi_header(data: &[u8]) -> Result<AcpiTableHeader, String> {
     })
 }
 
+/// Extracts DSDT and FACS physical addresses from a Fixed ACPI Description Table (FADT/FACP).
+///
+/// # Arguments
+/// * `data` - The raw binary data of the FADT table.
+///
+/// # Returns
+/// A vector of tuples containing the physical address and the signature of the referenced table.
+pub fn parse_fadt_references(data: &[u8]) -> Vec<(u64, String)> {
+    let mut refs = Vec::new();
+    if data.len() < 36 { return refs; }
+    
+    let sig = clean_str(&data[0..4]);
+    if sig != "FACP" { return refs; }
+    
+    // FADT (FACP) Structure
+    // FACS address at offset 36 (32-bit) or 132 (64-bit)
+    // DSDT address at offset 40 (32-bit) or 140 (64-bit)
+    
+    let facs_32 = LittleEndian::read_u32(&data[36..40]) as u64;
+    let dsdt_32 = LittleEndian::read_u32(&data[40..44]) as u64;
+    
+    if data.len() >= 148 {
+        let facs_64 = LittleEndian::read_u64(&data[132..140]);
+        let dsdt_64 = LittleEndian::read_u64(&data[140..148]);
+        
+        let facs = if facs_64 != 0 { facs_64 } else { facs_32 };
+        let dsdt = if dsdt_64 != 0 { dsdt_64 } else { dsdt_32 };
+        
+        if facs != 0 { refs.push((facs, "FACS".to_string())); }
+        if dsdt != 0 { refs.push((dsdt, "DSDT".to_string())); }
+    } else {
+        if facs_32 != 0 { refs.push((facs_32, "FACS".to_string())); }
+        if dsdt_32 != 0 { refs.push((dsdt_32, "DSDT".to_string())); }
+    }
+    
+    refs
+}
+
+/// Cleans a byte slice by converting it to a lossy UTF-8 string and trimming null terminators.
 fn clean_str(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .trim_matches(char::from(0))
         .to_string()
 }
 
-#[derive(Debug)]
-pub struct RawSMBIOSData {
-    pub major_version: u8,
-    pub minor_version: u8,
-    pub dmi_revision: u8,
-    pub length: u32,
+/// Parses an eXtended System Description Table (XSDT) to extract 64-bit physical address entries.
+///
+/// # Arguments
+/// * `data` - The raw binary data of the XSDT table.
+/// * `addr_map` - A map of addresses to known signatures used for labeling entries.
+///
+/// # Returns
+/// `Option<Vec<(usize, u64, String)>>` containing the index, address, and label for each entry.
+pub fn parse_xsdt_entries(data: &[u8], addr_map: &std::collections::HashMap<u64, String>) -> Option<Vec<(usize, u64, String)>> {
+    if data.len() < 36 {
+        return None;
+    }
+    
+    let sig = clean_str(&data[0..4]);
+    if sig != "XSDT" {
+        return None;
+    }
+    
+    let table_len = LittleEndian::read_u32(&data[4..8]) as usize;
+    if table_len > data.len() || table_len < 36 {
+        return None;
+    }
+    
+    // XSDT entries start at offset 36 (after standard header)
+    // Each entry is 8 bytes (64-bit pointer)
+    let entries_data = &data[36..table_len];
+    let entry_count = entries_data.len() / 8;
+    
+    let mut entries = Vec::new();
+    for i in 0..entry_count {
+        let offset = i * 8;
+        if offset + 8 > entries_data.len() { break; }
+        let addr = LittleEndian::read_u64(&entries_data[offset..offset + 8]);
+        
+        let label = addr_map.get(&addr).cloned().unwrap_or_else(|| format!("Entry{}", i));
+        entries.push((i, addr, label));
+    }
+    
+    Some(entries)
 }
 
+/// Metadata for the raw SMBIOS data structure as retrieved from Windows.
+#[derive(Debug)]
+pub struct RawSMBIOSData {
+    pub _major_version: u8,
+    pub _minor_version: u8,
+    pub _dmi_revision: u8,
+    pub _length: u32,
+}
+
+/// Parses the header of the raw SMBIOS data blob returned by Windows APIs.
+///
+/// # Arguments
+/// * `data` - The raw SMBIOS data buffer.
+///
+/// # Returns
+/// `Option<(RawSMBIOSData, usize)>` containing the parsed header and the size of the header in bytes.
 pub fn parse_raw_smbios_data_header(data: &[u8]) -> Option<(RawSMBIOSData, usize)> {
     if data.len() < 8 {
         return None;
@@ -75,22 +183,34 @@ pub fn parse_raw_smbios_data_header(data: &[u8]) -> Option<(RawSMBIOSData, usize
 
     Some((
         RawSMBIOSData {
-            major_version: major,
-            minor_version: minor,
-            dmi_revision: dmi,
-            length,
+            _major_version: major,
+            _minor_version: minor,
+            _dmi_revision: dmi,
+            _length: length,
         },
         8,
     ))
 }
 
+/// Header for an individual SMBIOS structure.
 #[derive(Debug, Clone)]
 pub struct SmbiosStructureHeader {
+    /// The SMBIOS type ID (e.g., 0 for BIOS, 1 for System).
     pub type_id: u8,
+    /// The length of the formatted portion of the structure.
     pub length: u8,
+    /// The unique handle for this structure instance.
     pub handle: u16,
 }
 
+/// Parses a single SMBIOS structure header and calculated its total size (including strings).
+///
+/// # Arguments
+/// * `data` - The raw SMBIOS data buffer.
+/// * `offset` - The current offset into the buffer.
+///
+/// # Returns
+/// `Result` containing the header and the next offset (end of the structure).
 pub fn parse_smbios_structure(data: &[u8], offset: usize) -> Result<(SmbiosStructureHeader, usize), ()> {
     if offset + 4 > data.len() {
         return Err(());
@@ -110,11 +230,10 @@ pub fn parse_smbios_structure(data: &[u8], offset: usize) -> Result<(SmbiosStruc
         handle,
     };
 
-    // Find end of structure (double null terminator)
+    // Find end of structure (terminated by a double null: 00 00)
     let formatted_end = offset + length as usize;
     let mut current = formatted_end;
     
-    // Safety check for bounds
     while current + 1 < data.len() {
         if data[current] == 0 && data[current + 1] == 0 {
             return Ok((header, current + 2));
@@ -122,11 +241,18 @@ pub fn parse_smbios_structure(data: &[u8], offset: usize) -> Result<(SmbiosStruc
         current += 1;
     }
 
-    // If we hit end of data without double null, assume end of data is end of struct?
-    // Usually double null is required. But if we are at the very end, returning len is ok.
     Ok((header, data.len()))
 }
 
+/// Extracts the string pool following the formatted portion of an SMBIOS structure.
+///
+/// # Arguments
+/// * `data` - The raw SMBIOS data buffer.
+/// * `offset` - The starting offset of the structure's formatted portion.
+/// * `length` - The length of the formatted portion.
+///
+/// # Returns
+/// A vector of strings extracted from the string pool.
 pub fn get_smbios_strings(data: &[u8], offset: usize, length: u8) -> Vec<String> {
     let mut strings = Vec::new();
     let str_start = offset + length as usize;
@@ -137,15 +263,10 @@ pub fn get_smbios_strings(data: &[u8], offset: usize, length: u8) -> Vec<String>
 
     let mut current_idx = str_start;
     while current_idx < data.len() {
-        // Find next null
         match data[current_idx..].iter().position(|&b| b == 0) {
             Some(pos) => {
                 let null_idx = current_idx + pos;
                 if null_idx == current_idx {
-                    // Empty string / end marker?
-                    // Actually if we hit the second null of the double null, we stop.
-                    // But here we are iterating strings.
-                    // If we encounter an empty string (len 0), that might be the terminator.
                     break;
                 }
                 
@@ -154,17 +275,24 @@ pub fn get_smbios_strings(data: &[u8], offset: usize, length: u8) -> Vec<String>
                 
                 current_idx = null_idx + 1;
                 
-                // If next byte is 0, we are done (double null)
                 if current_idx < data.len() && data[current_idx] == 0 {
                     break;
                 }
             }
-            None => break, // No more nulls
+            None => break,
         }
     }
     strings
 }
 
+/// Retrieves a string from the SMBIOS string pool by its 1-based index.
+///
+/// # Arguments
+/// * `strings` - The list of strings extracted from the structure.
+/// * `index` - The 1-based index of the string (0 means "None").
+///
+/// # Returns
+/// The requested string, or a placeholder if the index is invalid.
 pub fn get_string_by_index(strings: &[String], index: u8) -> String {
     if index == 0 {
         return "None".to_string();
@@ -177,8 +305,16 @@ pub fn get_string_by_index(strings: &[String], index: u8) -> String {
     }
 }
 
-// SMBIOS Parsers
-
+/// Dispatches raw SMBIOS structure data to specific type parsers to get human-readable key-value pairs.
+///
+/// # Arguments
+/// * `type_id` - The SMBIOS structure type (0, 1, 2, etc.).
+/// * `data` - The raw buffer.
+/// * `offset` - Starting offset of the structure.
+/// * `strings` - The extracted strings for this structure.
+///
+/// # Returns
+/// `Option<Vec<(String, String)>>` containing field names and values.
 pub fn parse_smbios_details(type_id: u8, data: &[u8], offset: usize, _header_len: u8, strings: &[String]) -> Option<Vec<(String, String)>> {
     match type_id {
         0 => Some(parse_type_0(data, offset, strings)),
@@ -195,9 +331,9 @@ pub fn parse_smbios_details(type_id: u8, data: &[u8], offset: usize, _header_len
     }
 }
 
+/// Parser for SMBIOS Type 0: BIOS Information.
 fn parse_type_0(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
-    // Offset 0x04: Vendor String Index
     if offset + 0x09 < data.len() {
         let vendor_idx = data[offset + 0x04];
         let ver_idx = data[offset + 0x05];
@@ -209,7 +345,6 @@ fn parse_type_0(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
         info.push(("Release Date".to_string(), get_string_by_index(strings, date_idx)));
 
         let size = if rom_size_enc == 0xFF {
-            // Extended calculation omitted for brevity, logic similar to Python
             "Extended".to_string()
         } else {
             let kb = (rom_size_enc as u32 + 1) * 64;
@@ -220,9 +355,10 @@ fn parse_type_0(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
     info
 }
 
+/// Parser for SMBIOS Type 1: System Information.
 fn parse_type_1(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
-    if offset + 0x18 <= data.len() { // Check length for UUID
+    if offset + 0x18 <= data.len() {
          let man_idx = data[offset + 0x04];
          let prod_idx = data[offset + 0x05];
          let ver_idx = data[offset + 0x06];
@@ -235,9 +371,7 @@ fn parse_type_1(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
 
          // UUID at 0x08 (16 bytes)
          let uuid_bytes = &data[offset + 0x08..offset + 0x18];
-         // Try to parse using uuid crate
-         // uuid crate expects bytes. construct from slice.
-         if let Ok(u) = uuid::Uuid::from_slice_le(uuid_bytes) { // SMBIOS 2.6+ uses Little Endian for first 3 fields
+         if let Ok(u) = uuid::Uuid::from_slice_le(uuid_bytes) {
              info.push(("UUID".to_string(), u.to_string().to_uppercase()));
          } else {
              info.push(("UUID".to_string(), hex::encode(uuid_bytes).to_uppercase()));
@@ -246,25 +380,26 @@ fn parse_type_1(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
     info
 }
 
+/// Parser for SMBIOS Type 2: Baseboard (or Module) Information.
 fn parse_type_2(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
      if offset + 0x08 < data.len() {
-         let man_idx = data[offset + 0x04];
-         let prod_idx = data[offset + 0x05];
-         let ver_idx = data[offset + 0x06];
-         let ser_idx = data[offset + 0x07];
-         // asset_idx is at 0x08, check length if needed (Baseboard usually has it)
-         let asset_idx = if offset + 0x08 < data.len() { data[offset + 0x08] } else { 0 };
+          let man_idx = data[offset + 0x04];
+          let prod_idx = data[offset + 0x05];
+          let ver_idx = data[offset + 0x06];
+          let ser_idx = data[offset + 0x07];
+          let asset_idx = if offset + 0x08 < data.len() { data[offset + 0x08] } else { 0 };
 
-         info.push(("Manufacturer".to_string(), get_string_by_index(strings, man_idx)));
-         info.push(("Product Name".to_string(), get_string_by_index(strings, prod_idx)));
-         info.push(("Version".to_string(), get_string_by_index(strings, ver_idx)));
-         info.push(("Serial Number".to_string(), get_string_by_index(strings, ser_idx)));
-         info.push(("Asset Tag".to_string(), get_string_by_index(strings, asset_idx)));
-    }
+          info.push(("Manufacturer".to_string(), get_string_by_index(strings, man_idx)));
+          info.push(("Product Name".to_string(), get_string_by_index(strings, prod_idx)));
+          info.push(("Version".to_string(), get_string_by_index(strings, ver_idx)));
+          info.push(("Serial Number".to_string(), get_string_by_index(strings, ser_idx)));
+          info.push(("Asset Tag".to_string(), get_string_by_index(strings, asset_idx)));
+     }
     info
 }
 
+/// Parser for SMBIOS Type 3: System Enclosure or Chassis Information.
 fn parse_type_3(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
     if offset + 0x07 < data.len() {
@@ -281,6 +416,7 @@ fn parse_type_3(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
     info
 }
 
+/// Parser for SMBIOS Type 4: Processor Information.
 fn parse_type_4(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
     if offset + 0x10 < data.len() {
@@ -304,6 +440,7 @@ fn parse_type_4(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
     info
 }
 
+/// Parser for SMBIOS Type 17: Memory Device Information.
 fn parse_type_17(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
     if offset + 0x1B < data.len() {
@@ -348,6 +485,7 @@ fn parse_type_17(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String,
     info
 }
 
+/// Parser for SMBIOS Type 7: Cache Information.
 fn parse_type_7(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
     if offset + 0x0F < data.len() {
@@ -360,7 +498,6 @@ fn parse_type_7(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
         info.push(("Socket Designator".to_string(), get_string_by_index(strings, sock_idx)));
         info.push(("Configuration".to_string(), format!("0x{:04X}", cfg)));
         
-        // Size parsing (bit 15 is granularity: 0=1KB, 1=64KB)
         let parse_size = |s: u16| {
             if s == 0 { return "None".to_string(); }
             let val = s & 0x7FFF;
@@ -383,6 +520,7 @@ fn parse_type_7(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
     info
 }
 
+/// Parser for SMBIOS Type 9: System Slots Information.
 fn parse_type_9(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
     if offset + 0x09 < data.len() {
@@ -403,6 +541,7 @@ fn parse_type_9(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, 
     info
 }
 
+/// Parser for SMBIOS Type 11: OEM Strings Information.
 fn parse_type_11(_data: &[u8], _offset: usize, strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
     for (i, s) in strings.iter().enumerate() {
@@ -411,10 +550,11 @@ fn parse_type_11(_data: &[u8], _offset: usize, strings: &[String]) -> Vec<(Strin
     info
 }
 
+/// Parser for SMBIOS Type 32: System Boot Information.
 fn parse_type_32(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
     let mut info = Vec::new();
     if offset + 0x0A < data.len() {
-        let status = data[offset + 0x0A]; // Status is at 0x0A, header is 0x04..0x0A
+        let status = data[offset + 0x0A];
         info.push(("Boot Status".to_string(), format!("0x{:02X}", status)));
         
         let status_msg = match status {
@@ -431,4 +571,3 @@ fn parse_type_32(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String
     }
     info
 }
-
