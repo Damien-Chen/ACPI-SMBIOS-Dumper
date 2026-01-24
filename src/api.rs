@@ -1,9 +1,12 @@
-use windows::Win32::System::SystemInformation::{EnumSystemFirmwareTables, GetSystemFirmwareTable, FIRMWARE_TABLE_PROVIDER};
+use std::ffi::CStr;
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::System::Registry::{
-    RegOpenKeyExA, RegEnumKeyExA, RegQueryValueExA, RegEnumValueA, HKEY_LOCAL_MACHINE, HKEY, KEY_READ, REG_BINARY,
+    RegCloseKey, RegEnumKeyExA, RegEnumValueA, RegOpenKeyExA, RegQueryValueExA, HKEY,
+    HKEY_LOCAL_MACHINE, KEY_READ, REG_BINARY,
 };
-use std::ffi::CStr;
+use windows::Win32::System::SystemInformation::{
+    EnumSystemFirmwareTables, GetSystemFirmwareTable, FIRMWARE_TABLE_PROVIDER,
+};
 
 /// ACPI firmware table provider signature ('ACPI').
 pub const SIG_ACPI: u32 = u32::from_be_bytes(*b"ACPI"); // 0x41435049
@@ -60,64 +63,155 @@ fn read_real_signature(path: &str) -> Option<String> {
 pub fn enum_acpi_tables_registry() -> Result<Vec<AcpiTableInfo>, String> {
     let mut tables = Vec::new();
     let root_path = "HARDWARE\\ACPI\0";
-    
+
     unsafe {
         let mut h_root = HKEY::default();
-        if RegOpenKeyExA(HKEY_LOCAL_MACHINE, windows::core::PCSTR(root_path.as_ptr()), 0, KEY_READ, &mut h_root).is_err() {
-            return Err("Failed to open HKLM\\HARDWARE\\ACPI. Verify the tool is running as Administrator.".into());
+        if RegOpenKeyExA(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCSTR(root_path.as_ptr()),
+            0,
+            KEY_READ,
+            &mut h_root,
+        )
+        .is_err()
+        {
+            return Err(
+                "Failed to open HKLM\\HARDWARE\\ACPI. Verify the tool is running as Administrator."
+                    .into(),
+            );
         }
 
         let mut sig_idx = 0;
         loop {
             let mut sig_name = [0u8; 256];
             let mut sig_name_len = sig_name.len() as u32;
-            if RegEnumKeyExA(h_root, sig_idx, windows::core::PSTR(sig_name.as_mut_ptr()), &mut sig_name_len, None, windows::core::PSTR(std::ptr::null_mut()), None, None).is_err() {
+            if RegEnumKeyExA(
+                h_root,
+                sig_idx,
+                windows::core::PSTR(sig_name.as_mut_ptr()),
+                &mut sig_name_len,
+                None,
+                windows::core::PSTR(std::ptr::null_mut()),
+                None,
+                None,
+            )
+            .is_err()
+            {
                 break;
             }
-            let reg_sig_str = CStr::from_ptr(sig_name.as_ptr() as *const i8).to_string_lossy().into_owned();
-            
+            let reg_sig_str = CStr::from_ptr(sig_name.as_ptr() as *const i8)
+                .to_string_lossy()
+                .into_owned();
+
             // Open Signature Key
             let mut h_sig = HKEY::default();
-            if RegOpenKeyExA(h_root, windows::core::PCSTR(sig_name.as_ptr()), 0, KEY_READ, &mut h_sig).is_ok() {
+            if RegOpenKeyExA(
+                h_root,
+                windows::core::PCSTR(sig_name.as_ptr()),
+                0,
+                KEY_READ,
+                &mut h_sig,
+            )
+            .is_ok()
+            {
                 let mut oem_idx = 0;
                 loop {
                     let mut oem_name = [0u8; 256];
                     let mut oem_name_len = oem_name.len() as u32;
-                    if RegEnumKeyExA(h_sig, oem_idx, windows::core::PSTR(oem_name.as_mut_ptr()), &mut oem_name_len, None, windows::core::PSTR(std::ptr::null_mut()), None, None).is_err() {
+                    if RegEnumKeyExA(
+                        h_sig,
+                        oem_idx,
+                        windows::core::PSTR(oem_name.as_mut_ptr()),
+                        &mut oem_name_len,
+                        None,
+                        windows::core::PSTR(std::ptr::null_mut()),
+                        None,
+                        None,
+                    )
+                    .is_err()
+                    {
                         break;
                     }
-                    let oem_str = CStr::from_ptr(oem_name.as_ptr() as *const i8).to_string_lossy().into_owned();
+                    let oem_str = CStr::from_ptr(oem_name.as_ptr() as *const i8)
+                        .to_string_lossy()
+                        .into_owned();
 
                     // Open OEM Key
                     let mut h_oem = HKEY::default();
-                    if RegOpenKeyExA(h_sig, windows::core::PCSTR(oem_name.as_ptr()), 0, KEY_READ, &mut h_oem).is_ok() {
+                    if RegOpenKeyExA(
+                        h_sig,
+                        windows::core::PCSTR(oem_name.as_ptr()),
+                        0,
+                        KEY_READ,
+                        &mut h_oem,
+                    )
+                    .is_ok()
+                    {
                         let mut tab_idx = 0;
                         loop {
                             let mut tab_name = [0u8; 256];
                             let mut tab_name_len = tab_name.len() as u32;
-                            if RegEnumKeyExA(h_oem, tab_idx, windows::core::PSTR(tab_name.as_mut_ptr()), &mut tab_name_len, None, windows::core::PSTR(std::ptr::null_mut()), None, None).is_err() {
+                            if RegEnumKeyExA(
+                                h_oem,
+                                tab_idx,
+                                windows::core::PSTR(tab_name.as_mut_ptr()),
+                                &mut tab_name_len,
+                                None,
+                                windows::core::PSTR(std::ptr::null_mut()),
+                                None,
+                                None,
+                            )
+                            .is_err()
+                            {
                                 break;
                             }
-                            let tab_str = CStr::from_ptr(tab_name.as_ptr() as *const i8).to_string_lossy().into_owned();
+                            let tab_str = CStr::from_ptr(tab_name.as_ptr() as *const i8)
+                                .to_string_lossy()
+                                .into_owned();
 
                             // Open Table ID Key
                             let mut h_tab = HKEY::default();
-                            if RegOpenKeyExA(h_oem, windows::core::PCSTR(tab_name.as_ptr()), 0, KEY_READ, &mut h_tab).is_ok() {
+                            if RegOpenKeyExA(
+                                h_oem,
+                                windows::core::PCSTR(tab_name.as_ptr()),
+                                0,
+                                KEY_READ,
+                                &mut h_tab,
+                            )
+                            .is_ok()
+                            {
                                 let mut rev_idx = 0;
                                 loop {
                                     let mut rev_name = [0u8; 256];
                                     let mut rev_name_len = rev_name.len() as u32;
-                                    if RegEnumKeyExA(h_tab, rev_idx, windows::core::PSTR(rev_name.as_mut_ptr()), &mut rev_name_len, None, windows::core::PSTR(std::ptr::null_mut()), None, None).is_err() {
+                                    if RegEnumKeyExA(
+                                        h_tab,
+                                        rev_idx,
+                                        windows::core::PSTR(rev_name.as_mut_ptr()),
+                                        &mut rev_name_len,
+                                        None,
+                                        windows::core::PSTR(std::ptr::null_mut()),
+                                        None,
+                                        None,
+                                    )
+                                    .is_err()
+                                    {
                                         break;
                                     }
-                                    let rev_str = CStr::from_ptr(rev_name.as_ptr() as *const i8).to_string_lossy().into_owned();
+                                    let rev_str = CStr::from_ptr(rev_name.as_ptr() as *const i8)
+                                        .to_string_lossy()
+                                        .into_owned();
                                     let rev_val = u32::from_str_radix(&rev_str, 16).unwrap_or(0);
 
-                                    let full_path = format!("HARDWARE\\ACPI\\{}\\{}\\{}\\{}", reg_sig_str, oem_str, tab_str, rev_str);
-                                    
+                                    let full_path = format!(
+                                        "HARDWARE\\ACPI\\{}\\{}\\{}\\{}",
+                                        reg_sig_str, oem_str, tab_str, rev_str
+                                    );
+
                                     // Read real signature from binary data
-                                    let real_sig = read_real_signature(&full_path).unwrap_or_else(|| reg_sig_str.clone());
-                                    
+                                    let real_sig = read_real_signature(&full_path)
+                                        .unwrap_or_else(|| reg_sig_str.clone());
+
                                     // Try to find physical address (not always in registry, but sometimes in subkeys)
                                     let physical_address = None;
 
@@ -133,15 +227,19 @@ pub fn enum_acpi_tables_registry() -> Result<Vec<AcpiTableInfo>, String> {
 
                                     rev_idx += 1;
                                 }
+                                let _ = RegCloseKey(h_tab);
                             }
                             tab_idx += 1;
                         }
+                        let _ = RegCloseKey(h_oem);
                     }
                     oem_idx += 1;
                 }
+                let _ = RegCloseKey(h_sig);
             }
             sig_idx += 1;
         }
+        let _ = RegCloseKey(h_root);
     }
 
     Ok(tables)
@@ -156,12 +254,12 @@ pub fn enum_acpi_tables_registry() -> Result<Vec<AcpiTableInfo>, String> {
 /// A vector of `AcpiTableInfo`.
 pub fn load_acpi_tables_combined() -> Vec<AcpiTableInfo> {
     let mut combined = Vec::new();
-    
+
     // 1. Load from Registry (Priority for duplicates)
     if let Ok(reg_tables) = enum_acpi_tables_registry() {
         combined.extend(reg_tables);
     }
-    
+
     // 2. Load from API (Fallback for missing tables like UEFI)
     if let Ok(api_sigs) = enum_system_firmware_tables(SIG_ACPI) {
         for sig in api_sigs {
@@ -169,14 +267,14 @@ pub fn load_acpi_tables_combined() -> Vec<AcpiTableInfo> {
             if combined.iter().any(|t| t.signature == sig) {
                 continue;
             }
-            
+
             // Try to fetch table data to get header info
             if let Ok(data) = get_system_firmware_table(SIG_ACPI, &sig) {
                 if data.len() >= 36 {
                     let oem_id = String::from_utf8_lossy(&data[10..16]).trim().to_string();
                     let table_id = String::from_utf8_lossy(&data[16..24]).trim().to_string();
                     let revision = data[8] as u32;
-                    
+
                     combined.push(AcpiTableInfo {
                         signature: sig.clone(),
                         registry_sig: sig.clone(),
@@ -190,11 +288,9 @@ pub fn load_acpi_tables_combined() -> Vec<AcpiTableInfo> {
             }
         }
     }
-    
+
     combined
 }
-
-
 
 /// Retrieves the raw binary content of an ACPI table from the Windows Registry using its full path.
 ///
@@ -207,15 +303,42 @@ pub fn get_acpi_table_by_path(path: &str) -> Result<Vec<u8>, String> {
     unsafe {
         let mut h_key = HKEY::default();
         let path_null = format!("{}\0", path);
-        if RegOpenKeyExA(HKEY_LOCAL_MACHINE, windows::core::PCSTR(path_null.as_ptr()), 0, KEY_READ, &mut h_key).is_err() {
+        if RegOpenKeyExA(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCSTR(path_null.as_ptr()),
+            0,
+            KEY_READ,
+            &mut h_key,
+        )
+        .is_err()
+        {
             return Err(format!("Key open fail: {}", path));
         }
 
         // Try value name "0" first (common location for ACPI binary data)
         let mut size = 0u32;
-        if RegQueryValueExA(h_key, windows::core::PCSTR("0\0".as_ptr()), None, None, None, Some(&mut size)).is_ok() {
+        if RegQueryValueExA(
+            h_key,
+            windows::core::PCSTR(c"0".as_ptr() as *const u8),
+            None,
+            None,
+            None,
+            Some(&mut size),
+        )
+        .is_ok()
+        {
             let mut buffer = vec![0u8; size as usize];
-            if RegQueryValueExA(h_key, windows::core::PCSTR("0\0".as_ptr()), None, None, Some(buffer.as_mut_ptr()), Some(&mut size)).is_ok() {
+            if RegQueryValueExA(
+                h_key,
+                windows::core::PCSTR(c"0".as_ptr() as *const u8),
+                None,
+                None,
+                Some(buffer.as_mut_ptr()),
+                Some(&mut size),
+            )
+            .is_ok()
+            {
+                let _ = RegCloseKey(h_key);
                 return Ok(buffer);
             }
         }
@@ -227,24 +350,45 @@ pub fn get_acpi_table_by_path(path: &str) -> Result<Vec<u8>, String> {
             let mut val_name_len = val_name.len() as u32;
             let mut val_type = 0u32;
             let mut val_size = 0u32;
-            
-            if RegEnumValueA(h_key, val_idx, windows::core::PSTR(val_name.as_mut_ptr()), &mut val_name_len, None, Some(&mut val_type), None, Some(&mut val_size)).is_err() {
+
+            if RegEnumValueA(
+                h_key,
+                val_idx,
+                windows::core::PSTR(val_name.as_mut_ptr()),
+                &mut val_name_len,
+                None,
+                Some(&mut val_type),
+                None,
+                Some(&mut val_size),
+            )
+            .is_err()
+            {
                 break;
             }
 
             if val_type == REG_BINARY.0 {
                 let mut buffer = vec![0u8; val_size as usize];
-                if RegQueryValueExA(h_key, windows::core::PCSTR(val_name.as_ptr()), None, None, Some(buffer.as_mut_ptr()), Some(&mut val_size)).is_ok() {
+                if RegQueryValueExA(
+                    h_key,
+                    windows::core::PCSTR(val_name.as_ptr()),
+                    None,
+                    None,
+                    Some(buffer.as_mut_ptr()),
+                    Some(&mut val_size),
+                )
+                .is_ok()
+                {
+                    let _ = RegCloseKey(h_key);
                     return Ok(buffer);
                 }
             }
             val_idx += 1;
         }
 
+        let _ = RegCloseKey(h_key);
         Err(format!("No binary value found in registry key: {}", path))
     }
 }
-
 
 /// Enumerates available ACPI tables using the `EnumSystemFirmwareTables` Windows API.
 ///
@@ -269,10 +413,13 @@ pub fn enum_system_firmware_tables(provider: u32) -> Result<Vec<String>, String>
         let mut buffer = vec![0u8; size as usize];
         let ret = EnumSystemFirmwareTables(provider, Some(&mut buffer));
         if ret == 0 {
-             let err = GetLastError();
-             return Err(format!("EnumSystemFirmwareTables (2nd call) failed. Code: {:?}", err));
+            let err = GetLastError();
+            return Err(format!(
+                "EnumSystemFirmwareTables (2nd call) failed. Code: {:?}",
+                err
+            ));
         }
-        
+
         let count = (ret as usize) / 4;
         let mut tables = Vec::new();
         for i in 0..count {
@@ -296,7 +443,7 @@ pub fn enum_system_firmware_tables(provider: u32) -> Result<Vec<String>, String>
                 }
             }
         }
-        
+
         Ok(tables)
     }
 }
@@ -315,32 +462,35 @@ pub fn get_system_firmware_table(provider: u32, table_id: &str) -> Result<Vec<u8
 
     let id_int = if provider_u32 == SIG_RSMB {
         0
-    } else {
-        if table_id.len() != 4 {
-             if table_id == "0" { 0 } else {
-                 return Err("Table ID must be 4 characters for ACPI".into());
-             }
+    } else if table_id.len() != 4 {
+        if table_id == "0" {
+            0
         } else {
-             let bytes = table_id.as_bytes();
-             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            return Err("Table ID must be 4 characters for ACPI".into());
         }
+    } else {
+        let bytes = table_id.as_bytes();
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     };
 
     unsafe {
         let size = GetSystemFirmwareTable(provider_type, id_int, None);
         if size == 0 {
-             let err = GetLastError();
-             if err.is_err() { 
-                  return Err(format!("GetSystemFirmwareTable failed. Code: {:?}", err));
-             }
-             return Ok(Vec::new());
+            let err = GetLastError();
+            if err.is_err() {
+                return Err(format!("GetSystemFirmwareTable failed. Code: {:?}", err));
+            }
+            return Ok(Vec::new());
         }
 
         let mut buffer = vec![0u8; size as usize];
         let ret = GetSystemFirmwareTable(provider_type, id_int, Some(&mut buffer));
         if ret == 0 {
-             let err = GetLastError();
-             return Err(format!("GetSystemFirmwareTable (2nd call) failed. Code: {:?}", err));
+            let err = GetLastError();
+            return Err(format!(
+                "GetSystemFirmwareTable (2nd call) failed. Code: {:?}",
+                err
+            ));
         }
 
         Ok(buffer)

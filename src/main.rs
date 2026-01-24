@@ -2,10 +2,10 @@
 
 /// The `api` module handles low-level firmware table retrieval from the OS.
 mod api;
-/// The `parsers` module containing logic to interpret raw bytes for ACPI and SMBIOS.
-mod parsers;
 /// The `gui` module manages the application's graphical user interface.
 mod gui;
+/// The `parsers` module containing logic to interpret raw bytes for ACPI and SMBIOS.
+mod parsers;
 
 use windows::Win32::UI::Shell::IsUserAnAdmin;
 
