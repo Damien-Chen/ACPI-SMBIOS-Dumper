@@ -1,7 +1,12 @@
 use crate::api;
 use crate::parsers;
 use eframe::egui;
+use eframe::egui::{Color32, FontId, Galley, TextFormat};
 use std::io::Write;
+use std::sync::Arc;
+use windows::Win32::UI::Shell::IsUserAnAdmin;
+
+const STATUS_OK: &str = "Ready";
 
 /// Entry point for launching the GUI version of the BIOS Dump Tool.
 ///
@@ -92,6 +97,17 @@ struct DumpApp {
     search_panel_open: bool,
     /// Whether dark mode is enabled.
     dark_mode: bool,
+
+    /// Status message for load/operations.
+    status: String,
+    /// Whether process has admin rights (affects firmware APIs).
+    is_admin: bool,
+    /// Parsed SMBIOS header for version info.
+    smbios_header: Option<parsers::RawSMBIOSData>,
+
+    /// Cached match positions for search.
+    search_matches: Vec<usize>,
+    search_current: usize,
 }
 
 impl DumpApp {
@@ -99,6 +115,7 @@ impl DumpApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Default to dark mode
         let dark_mode = cc.egui_ctx.style().visuals.dark_mode;
+        let is_admin = unsafe { IsUserAnAdmin().as_bool() };
 
         Self {
             acpi_tables: None,
@@ -112,6 +129,11 @@ impl DumpApp {
             search_query: String::new(),
             search_panel_open: false,
             dark_mode,
+            status: STATUS_OK.to_string(),
+            is_admin,
+            smbios_header: None,
+            search_matches: Vec::new(),
+            search_current: 0,
         }
     }
 
@@ -122,63 +144,79 @@ impl DumpApp {
 
     /// Triggers the combined discovery of ACPI tables and updates the state.
     fn load_acpi(&mut self) {
-        self.acpi_tables = Some(api::load_acpi_tables_combined());
+        let tables = api::load_acpi_tables_combined();
+        if tables.is_empty() {
+            self.status = "No ACPI tables found (admin required?)".to_string();
+        } else {
+            self.status = format!("Loaded {} ACPI tables", tables.len());
+        }
+        self.acpi_tables = Some(tables);
     }
 
     /// Triggers the retrieval and parsing of SMBIOS data and updates the state.
     fn load_smbios(&mut self) {
-        let smbios_data = api::get_smbios_data().unwrap_or_default();
+        let smbios_data = match api::get_smbios_data() {
+            Ok(data) => {
+                self.status = "Loaded SMBIOS data".to_string();
+                data
+            }
+            Err(e) => {
+                self.status = format!("SMBIOS load failed: {}", e);
+                Vec::new()
+            }
+        };
 
         let mut smbios_list = Vec::new();
+        self.smbios_header = None;
         if !smbios_data.is_empty() {
-            let (start_offset, _) = parsers::parse_raw_smbios_data_header(&smbios_data)
-                .map(|(_, off)| (off, 0))
-                .unwrap_or((0, 0));
+            if let Some((hdr, off)) = parsers::parse_raw_smbios_data_header(&smbios_data) {
+                self.smbios_header = Some(hdr);
+                let mut current_off = off;
 
-            let mut current_off = start_offset;
-            while current_off < smbios_data.len() {
-                if let Ok((header, next_off)) =
-                    parsers::parse_smbios_structure(&smbios_data, current_off)
-                {
-                    let mut label =
-                        format!("Type {} (Handle 0x{:04X})", header.type_id, header.handle);
-                    let type_name = match header.type_id {
-                        0 => "BIOS Info",
-                        1 => "System Info",
-                        2 => "Baseboard",
-                        3 => "Chassis",
-                        4 => "Processor",
-                        7 => "Cache Info",
-                        8 => "Port Connector",
-                        9 => "System Slots",
-                        11 => "OEM Strings",
-                        13 => "BIOS Language",
-                        16 => "Memory Array",
-                        17 => "Memory Device",
-                        19 => "Memory Mapped",
-                        32 => "Boot Info",
-                        127 => "End-of-Table",
-                        _ => "",
-                    };
-                    if !type_name.is_empty() {
-                        label.push_str(" - ");
-                        label.push_str(type_name);
-                    }
+                while current_off < smbios_data.len() {
+                    if let Ok((header, next_off)) =
+                        parsers::parse_smbios_structure(&smbios_data, current_off)
+                    {
+                        let mut label =
+                            format!("Type {} (Handle 0x{:04X})", header.type_id, header.handle);
+                        let type_name = match header.type_id {
+                            0 => "BIOS Info",
+                            1 => "System Info",
+                            2 => "Baseboard",
+                            3 => "Chassis",
+                            4 => "Processor",
+                            7 => "Cache Info",
+                            8 => "Port Connector",
+                            9 => "System Slots",
+                            11 => "OEM Strings",
+                            13 => "BIOS Language",
+                            16 => "Memory Array",
+                            17 => "Memory Device",
+                            19 => "Memory Mapped",
+                            32 => "Boot Info",
+                            127 => "End-of-Table",
+                            _ => "",
+                        };
+                        if !type_name.is_empty() {
+                            label.push_str(" - ");
+                            label.push_str(type_name);
+                        }
 
-                    smbios_list.push((
-                        current_off,
-                        header.type_id,
-                        header.length,
-                        header.handle,
-                        label,
-                    ));
+                        smbios_list.push((
+                            current_off,
+                            header.type_id,
+                            header.length,
+                            header.handle,
+                            label,
+                        ));
 
-                    if next_off == current_off {
+                        if next_off <= current_off {
+                            break;
+                        }
+                        current_off = next_off;
+                    } else {
                         break;
                     }
-                    current_off = next_off;
-                } else {
-                    break;
                 }
             }
         }
@@ -197,10 +235,14 @@ impl DumpApp {
         };
 
         match result {
-            Ok(data) => self.update_cache(&data, "ACPI", &info.signature),
+            Ok(data) => {
+                self.status = format!("Loaded ACPI {}", info.signature);
+                self.update_cache(&data, "ACPI", &info.signature)
+            }
             Err(e) => {
                 self.cached_hex = format!("Error: {}", e);
                 self.cached_parsed = format!("Error: {}", e);
+                self.status = format!("ACPI load failed: {}", e);
             }
         }
     }
@@ -211,7 +253,10 @@ impl DumpApp {
         if let Some(ref data) = self.smbios_data {
             if let Ok((_, next_off)) = parsers::parse_smbios_structure(data, offset) {
                 let data_vec = data[offset..next_off].to_vec();
+                self.status = format!("Loaded SMBIOS type {}", type_id);
                 self.update_cache(&data_vec, "SMBIOS", &format!("Type {}", type_id));
+            } else {
+                self.status = "SMBIOS parse failed".to_string();
             }
         }
     }
@@ -298,6 +343,53 @@ impl DumpApp {
             }
         }
         self.cached_parsed = out;
+
+        // Refresh search matches if query exists
+        if !self.search_query.is_empty() {
+            self.recompute_search_matches();
+        }
+    }
+
+    /// Recomputes search match positions for the active text.
+    fn recompute_search_matches(&mut self) {
+        let text = match self.active_tab {
+            Tab::Hex => &self.cached_hex,
+            Tab::Parsed => &self.cached_parsed,
+        }
+        .to_lowercase();
+
+        let query = self.search_query.to_lowercase();
+        self.search_matches.clear();
+        self.search_current = 0;
+        if query.is_empty() {
+            return;
+        }
+
+        let mut start = 0;
+        while let Some(pos) = text[start..].find(&query) {
+            self.search_matches.push(start + pos);
+            start += pos + query.len().max(1);
+        }
+    }
+
+    /// Advances search selection.
+    fn step_search(&mut self, delta: isize) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let len = self.search_matches.len();
+        let cur = self.search_current as isize;
+        let next = (cur + delta).rem_euclid(len as isize);
+        self.search_current = next as usize;
+    }
+
+    /// Sanitizes a filename fragment for Windows.
+    fn clean_filename_fragment(fragment: &str) -> String {
+        let invalid = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+        fragment
+            .chars()
+            .map(|c| if invalid.contains(&c) { '_' } else { c })
+            .collect()
     }
 
     /// Opens a save file dialog to export the currently selected item as a raw binary file.
@@ -313,7 +405,11 @@ impl DumpApp {
                 match result {
                     Ok(data) => (
                         data,
-                        format!("{}_{}.aml", info.signature, info.table_id.trim()),
+                        format!(
+                            "{}_{}.aml",
+                            info.signature,
+                            Self::clean_filename_fragment(info.table_id.trim())
+                        ),
                     ),
                     Err(e) => {
                         rfd::MessageDialog::new()
@@ -375,9 +471,11 @@ impl DumpApp {
     /// Opens a save file dialog to export the currently selected item's parsed view as a text file.
     fn export_parsed(&self) {
         let default_name = match &self.selected_item {
-            Selection::Acpi(info) => {
-                format!("{}_{}_parsed.txt", info.signature, info.table_id.trim())
-            }
+            Selection::Acpi(info) => format!(
+                "{}_{}_parsed.txt",
+                info.signature,
+                Self::clean_filename_fragment(info.table_id.trim())
+            ),
             Selection::Smbios(_, tid) => format!("smbios_type_{}_parsed.txt", tid),
             Selection::None => return,
         };
@@ -550,6 +648,15 @@ impl eframe::App for DumpApp {
             ctx.set_visuals(egui::Visuals::light());
         }
 
+        egui::TopBottomPanel::top("admin_banner").show(ctx, |ui| {
+            if !self.is_admin {
+                ui.colored_label(
+                    Color32::from_rgb(200, 50, 50),
+                    "Running without Administrator privileges. Some firmware reads may fail.",
+                );
+            }
+        });
+
         egui::SidePanel::left("sidebar_panel")
             .resizable(true)
             .default_width(320.0)
@@ -622,6 +729,12 @@ impl eframe::App for DumpApp {
                         .default_open(true)
                         .show(ui, |ui| {
                             if self.smbios_data.is_some() {
+                                if let Some(h) = &self.smbios_header {
+                                    ui.label(format!(
+                                        "Version {}.{} | DMI rev {}",
+                                        h._major_version, h._minor_version, h._dmi_revision
+                                    ));
+                                }
                                 ui.horizontal(|ui| {
                                     if ui.button("💾 Export Full Blob").clicked() {
                                         self.export_full_smbios();
@@ -667,12 +780,14 @@ impl eframe::App for DumpApp {
                         .clicked()
                     {
                         self.active_tab = Tab::Hex;
+                        self.recompute_search_matches();
                     }
                     if ui
                         .selectable_label(self.active_tab == Tab::Parsed, "Parsed View")
                         .clicked()
                     {
                         self.active_tab = Tab::Parsed;
+                        self.recompute_search_matches();
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -730,18 +845,26 @@ impl eframe::App for DumpApp {
                         if self.search_panel_open {
                             response.request_focus();
                         }
-
-                        let text_to_search = match self.active_tab {
-                            Tab::Hex => &self.cached_hex,
-                            Tab::Parsed => &self.cached_parsed,
-                        };
+                        if response.changed() {
+                            self.recompute_search_matches();
+                        }
 
                         if !self.search_query.is_empty() {
-                            let matches = text_to_search
-                                .to_lowercase()
-                                .matches(&self.search_query.to_lowercase())
-                                .count();
-                            ui.label(format!("{} matches", matches));
+                            let total = self.search_matches.len();
+                            let current = if total > 0 {
+                                format!(" ({}/{})", self.search_current + 1, total)
+                            } else {
+                                "".to_string()
+                            };
+                            ui.label(format!("{} matches{}", total, current));
+                            ui.add_enabled_ui(total > 0, |ui| {
+                                if ui.button("Prev").clicked() {
+                                    self.step_search(-1);
+                                }
+                                if ui.button("Next").clicked() {
+                                    self.step_search(1);
+                                }
+                            });
                         }
 
                         if ui.button("Close").clicked() {
@@ -758,13 +881,67 @@ impl eframe::App for DumpApp {
                         Tab::Parsed => &mut self.cached_parsed,
                     };
 
+                    // Highlight search matches in the active text
+                    let matches = self.search_matches.clone();
+                    let query = self.search_query.clone();
+                    let active_idx = self.search_current;
+                    let mut layouter =
+                        move |ui: &egui::Ui, text: &str, wrap_width: f32| -> Arc<Galley> {
+                            let mut job = egui::text::LayoutJob::default();
+                            let default_fmt = TextFormat {
+                                font_id: FontId::monospace(14.0),
+                                color: ui.visuals().text_color(),
+                                ..Default::default()
+                            };
+
+                            if query.is_empty() || matches.is_empty() {
+                                job.append(text, 0.0, default_fmt.clone());
+                            } else {
+                                let query_len = query.len();
+                                let mut cursor = 0;
+                                for (i, pos) in matches.iter().enumerate() {
+                                    if *pos > text.len() {
+                                        break;
+                                    }
+                                    if cursor < *pos {
+                                        job.append(&text[cursor..*pos], 0.0, default_fmt.clone());
+                                    }
+                                    let end = (*pos + query_len).min(text.len());
+                                    let mut highlight_fmt = default_fmt.clone();
+                                    highlight_fmt.background = if i == active_idx {
+                                        Color32::from_rgb(80, 130, 210)
+                                    } else {
+                                        Color32::from_rgb(70, 70, 70)
+                                    };
+                                    highlight_fmt.color = Color32::WHITE;
+                                    job.append(&text[*pos..end], 0.0, highlight_fmt);
+                                    cursor = end;
+                                }
+
+                                if cursor < text.len() {
+                                    job.append(&text[cursor..], 0.0, default_fmt);
+                                }
+                            }
+
+                            job.wrap.max_width = wrap_width;
+                            let galley: Arc<Galley> = ui.fonts(|f| f.layout_job(job));
+                            galley
+                        };
+
                     ui.add_sized(
                         ui.available_size(),
                         egui::TextEdit::multiline(text)
                             .font(egui::TextStyle::Monospace)
-                            .lock_focus(true),
+                            .lock_focus(true)
+                            .layouter(&mut layouter),
                     );
                 });
+            });
+        });
+
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("Status: {}", self.status));
             });
         });
     }
