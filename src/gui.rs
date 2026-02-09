@@ -2,6 +2,9 @@ use crate::api;
 use crate::parsers;
 use eframe::egui;
 use eframe::egui::{Color32, FontId, Galley, TextFormat};
+use eframe::Storage;
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 use windows::Win32::UI::Shell::IsUserAnAdmin;
@@ -113,8 +116,13 @@ struct DumpApp {
 impl DumpApp {
     /// Creates a new instance of the application with default state.
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Default to dark mode
-        let dark_mode = cc.egui_ctx.style().visuals.dark_mode;
+        // Default to dark mode (persist if available)
+        let mut dark_mode = cc.egui_ctx.style().visuals.dark_mode;
+        if let Some(storage) = cc.storage {
+            if let Some(stored) = storage.get_string("ui.dark_mode") {
+                dark_mode = stored == "1";
+            }
+        }
         let is_admin = unsafe { IsUserAnAdmin().as_bool() };
 
         Self {
@@ -140,6 +148,40 @@ impl DumpApp {
     /// Copies the given text to the system clipboard.
     fn copy_to_clipboard(&self, ctx: &egui::Context, text: &str) {
         ctx.copy_text(text.to_string());
+    }
+
+    /// Retrieve parsed key/value pairs for the selected SMBIOS structure.
+    fn current_smbios_fields(&self) -> Option<Vec<(String, String)>> {
+        if let Selection::Smbios(offset, _) = self.selected_item {
+            if let Some(data) = &self.smbios_data {
+                if let Ok((header, next_off)) = parsers::parse_smbios_structure(data, offset) {
+                    let strings = parsers::get_smbios_strings(data, offset, header.length);
+                    if let Some(details) = parsers::parse_smbios_details(
+                        header.type_id,
+                        data,
+                        offset,
+                        header.length,
+                        &strings,
+                    ) {
+                        return Some(details);
+                    }
+                    if !strings.is_empty() {
+                        let mut out = Vec::new();
+                        for (i, s) in strings.iter().enumerate() {
+                            out.push((format!("String {}", i + 1), s.clone()));
+                        }
+                        return Some(out);
+                    }
+                    // fallback to show raw slice length
+                    let raw_len = next_off.saturating_sub(offset);
+                    return Some(vec![
+                        ("Handle".to_string(), format!("0x{:04X}", header.handle)),
+                        ("Length".to_string(), format!("{} bytes", raw_len)),
+                    ]);
+                }
+            }
+        }
+        None
     }
 
     /// Triggers the combined discovery of ACPI tables and updates the state.
@@ -243,6 +285,93 @@ impl DumpApp {
                 self.cached_hex = format!("Error: {}", e);
                 self.cached_parsed = format!("Error: {}", e);
                 self.status = format!("ACPI load failed: {}", e);
+            }
+        }
+    }
+
+    /// Export selected SMBIOS structure as JSON of parsed fields.
+    fn export_smbios_json(&self) {
+        let (_tid, default_name) = match self.selected_item {
+            Selection::Smbios(_, tid) => (tid, format!("smbios_type_{}.json", tid)),
+            _ => return,
+        };
+
+        let fields = match self.current_smbios_fields() {
+            Some(f) => f,
+            None => {
+                rfd::MessageDialog::new()
+                    .set_title("Export Error")
+                    .set_description("No parsed fields available for this SMBIOS structure.")
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                return;
+            }
+        };
+
+        let map: std::collections::BTreeMap<_, _> = fields.into_iter().collect();
+        let json_str = match serde_json::to_string_pretty(&json!(map)) {
+            Ok(s) => s,
+            Err(e) => {
+                rfd::MessageDialog::new()
+                    .set_title("Export Error")
+                    .set_description(format!("Failed to serialize JSON: {}", e))
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                return;
+            }
+        };
+
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("JSON", &['j', 's', 'o', 'n'])
+            .save_file()
+        {
+            if let Err(e) = std::fs::write(&path, json_str) {
+                rfd::MessageDialog::new()
+                    .set_title("Export Error")
+                    .set_description(format!("Failed to write file: {}", e))
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+            }
+        }
+    }
+
+    /// Export selected SMBIOS structure as CSV of parsed fields.
+    fn export_smbios_csv(&self) {
+        let (_tid, default_name) = match self.selected_item {
+            Selection::Smbios(_, tid) => (tid, format!("smbios_type_{}.csv", tid)),
+            _ => return,
+        };
+
+        let fields = match self.current_smbios_fields() {
+            Some(f) => f,
+            None => {
+                rfd::MessageDialog::new()
+                    .set_title("Export Error")
+                    .set_description("No parsed fields available for this SMBIOS structure.")
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                return;
+            }
+        };
+
+        let mut csv_data = String::from("key,value\n");
+        for (k, v) in fields {
+            let escaped = v.replace('"', "\"\"");
+            csv_data.push_str(&format!("\"{}\",\"{}\"\n", k, escaped));
+        }
+
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("CSV", &['c', 's', 'v'])
+            .save_file()
+        {
+            if let Err(e) = std::fs::write(&path, csv_data) {
+                rfd::MessageDialog::new()
+                    .set_title("Export Error")
+                    .set_description(format!("Failed to write file: {}", e))
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
             }
         }
     }
@@ -702,21 +831,53 @@ impl eframe::App for DumpApp {
                                 });
                                 ui.separator();
 
-                                let mut clicked_acpi = None;
-                                for t in tables {
-                                    let label = format!("{} ({})", t.signature, t.table_id.trim());
-                                    if !filter.is_empty() && !label.to_lowercase().contains(&filter)
-                                    {
-                                        continue;
-                                    }
-                                    let is_selected = match &self.selected_item {
-                                        Selection::Acpi(s) => s == t,
-                                        _ => false,
-                                    };
-                                    if ui.selectable_label(is_selected, &label).clicked() {
-                                        clicked_acpi = Some(t.clone());
-                                    }
+                                // Group by signature for easier browsing
+                                let mut grouped: BTreeMap<String, Vec<api::AcpiTableInfo>> =
+                                    BTreeMap::new();
+                                for t in tables.iter() {
+                                    grouped.entry(t.signature.clone()).or_default().push(t.clone());
                                 }
+                                for (_sig, list) in grouped.iter_mut() {
+                                    list.sort_by(|a, b| {
+                                        a.table_id
+                                            .cmp(&b.table_id)
+                                            .then(a.revision.cmp(&b.revision))
+                                    });
+                                }
+
+                                let mut clicked_acpi = None;
+                                for (sig, list) in grouped {
+                                    ui.collapsing(format!("{} ({} tables)", sig, list.len()), |ui| {
+                                        for t in list {
+                                            let label = format!(
+                                                "{} ({})",
+                                                t.signature,
+                                                t.table_id.trim()
+                                            );
+                                            if !filter.is_empty()
+                                                && !label.to_lowercase().contains(&filter)
+                                            {
+                                                continue;
+                                            }
+                                            let is_selected = matches!(&self.selected_item, Selection::Acpi(s) if s == &t);
+                                            let hover = format!(
+                                                "OEM: {}\nTable ID: {}\nRevision: {}\nRegistry: {}",
+                                                t.oem_id,
+                                                t.table_id,
+                                                t.revision,
+                                                t.registry_path.as_deref().unwrap_or("<API>")
+                                            );
+                                            if ui
+                                                .selectable_label(is_selected, &label)
+                                                .on_hover_text(hover)
+                                                .clicked()
+                                            {
+                                                clicked_acpi = Some(t.clone());
+                                            }
+                                        }
+                                    });
+                                }
+
                                 if let Some(t) = clicked_acpi {
                                     self.select_acpi(t);
                                 }
@@ -743,18 +904,17 @@ impl eframe::App for DumpApp {
                                 ui.separator();
 
                                 let mut clicked_smbios = None;
-                                for (offset, type_id, _length, _handle, label) in &self.smbios_list
-                                {
+                                let mut smbios_sorted = self.smbios_list.clone();
+                                smbios_sorted.sort_by(|a, b| a.1.cmp(&b.1).then(a.3.cmp(&b.3)));
+
+                                for (offset, type_id, _length, _handle, label) in smbios_sorted {
                                     if !filter.is_empty() && !label.to_lowercase().contains(&filter)
                                     {
                                         continue;
                                     }
-                                    let is_selected = match &self.selected_item {
-                                        Selection::Smbios(off, _) => *off == *offset,
-                                        _ => false,
-                                    };
+                                    let is_selected = matches!(&self.selected_item, Selection::Smbios(off, _) if *off == offset);
                                     if ui.selectable_label(is_selected, label).clicked() {
-                                        clicked_smbios = Some((*offset, *type_id));
+                                        clicked_smbios = Some((offset, type_id));
                                     }
                                 }
                                 if let Some((off, tid)) = clicked_smbios {
@@ -774,7 +934,14 @@ impl eframe::App for DumpApp {
             }
 
             ui.vertical(|ui| {
-                ui.horizontal(|ui| {
+                let toolbar_width = ui.available_width();
+
+                // Row 1: tabs + search toggle (wrap to avoid overlap on narrow widths)
+                ui.horizontal_wrapped(|ui| {
+                    ui.set_width(toolbar_width);
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.y = 4.0;
+
                     if ui
                         .selectable_label(self.active_tab == Tab::Hex, "Hex View")
                         .clicked()
@@ -790,48 +957,74 @@ impl eframe::App for DumpApp {
                         self.recompute_search_matches();
                     }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let has_selection = !matches!(self.selected_item, Selection::None);
-
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("📥 Export Parsed"))
-                            .on_disabled_hover_text("Select an item to export")
-                            .clicked()
-                        {
-                            self.export_parsed();
-                        }
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("📦 Export Raw Binary"))
-                            .on_disabled_hover_text("Select an item to export")
-                            .clicked()
-                        {
-                            self.export_raw();
-                        }
-
-                        ui.separator();
-
-                        // Clipboard copy button for current view
-                        let has_data =
-                            !self.cached_hex.is_empty() || !self.cached_parsed.is_empty();
-                        if ui
-                            .add_enabled(has_data, egui::Button::new("📋 Copy"))
-                            .on_hover_text("Copy current view to clipboard")
-                            .on_disabled_hover_text("Select an item first")
-                            .clicked()
-                        {
-                            let text_to_copy = match self.active_tab {
-                                Tab::Hex => &self.cached_hex,
-                                Tab::Parsed => &self.cached_parsed,
-                            };
-                            self.copy_to_clipboard(ctx, text_to_copy);
-                        }
-
-                        if ui
-                            .toggle_value(&mut self.search_panel_open, "🔍 Search (Ctrl+F)")
-                            .clicked()
-                        {}
-                    });
+                    ui.add_space(8.0);
+                    if ui
+                        .toggle_value(&mut self.search_panel_open, "🔍 Search (Ctrl+F)")
+                        .clicked()
+                    {}
                 });
+
+                // Row 2: clipboard and exports (wrapped to avoid overlap)
+                ui.horizontal_wrapped(|ui| {
+                    ui.set_width(toolbar_width);
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.y = 4.0;
+
+                    let has_selection = !matches!(self.selected_item, Selection::None);
+
+                    let has_data = !self.cached_hex.is_empty() || !self.cached_parsed.is_empty();
+                    if ui
+                        .add_enabled(has_data, egui::Button::new("📋 Copy"))
+                        .on_hover_text("Copy current view to clipboard")
+                        .on_disabled_hover_text("Select an item first")
+                        .clicked()
+                    {
+                        let text_to_copy = match self.active_tab {
+                            Tab::Hex => &self.cached_hex,
+                            Tab::Parsed => &self.cached_parsed,
+                        };
+                        self.copy_to_clipboard(ctx, text_to_copy);
+                    }
+
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("📦 Export Raw Binary"))
+                        .on_disabled_hover_text("Select an item to export")
+                        .clicked()
+                    {
+                        self.export_raw();
+                    }
+
+                    if ui
+                        .add_enabled(
+                            matches!(self.selected_item, Selection::Smbios(..)),
+                            egui::Button::new("� Export CSV"),
+                        )
+                        .on_disabled_hover_text("Select an SMBIOS item")
+                        .clicked()
+                    {
+                        self.export_smbios_csv();
+                    }
+
+                    if ui
+                        .add_enabled(
+                            matches!(self.selected_item, Selection::Smbios(..)),
+                            egui::Button::new("� Export JSON"),
+                        )
+                        .on_disabled_hover_text("Select an SMBIOS item")
+                        .clicked()
+                    {
+                        self.export_smbios_json();
+                    }
+
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("📥 Export Parsed"))
+                        .on_disabled_hover_text("Select an item to export")
+                        .clicked()
+                    {
+                        self.export_parsed();
+                    }
+                });
+
                 ui.separator();
 
                 // Search Bar
@@ -944,5 +1137,16 @@ impl eframe::App for DumpApp {
                 ui.label(format!("Status: {}", self.status));
             });
         });
+    }
+
+    fn save(&mut self, storage: &mut dyn Storage) {
+        storage.set_string(
+            "ui.dark_mode",
+            if self.dark_mode {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
+        );
     }
 }

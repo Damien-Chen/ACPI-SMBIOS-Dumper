@@ -351,6 +351,9 @@ pub fn parse_smbios_details(
         2 => Some(parse_type_2(data, offset, strings)),
         3 => Some(parse_type_3(data, offset, strings)),
         4 => Some(parse_type_4(data, offset, strings)),
+        10 => Some(parse_type_10(data, offset, strings)),
+        12 => Some(parse_type_12(data, offset, strings)),
+        15 => Some(parse_type_15(data, offset, strings)),
         7 => Some(parse_type_7(data, offset, strings)),
         8 => Some(parse_type_8(data, offset, strings)),
         9 => Some(parse_type_9(data, offset, strings)),
@@ -359,10 +362,347 @@ pub fn parse_smbios_details(
         16 => Some(parse_type_16(data, offset, strings)),
         17 => Some(parse_type_17(data, offset, strings)),
         19 => Some(parse_type_19(data, offset, strings)),
+        18 => Some(parse_type_18(data, offset, strings)),
+        22 => Some(parse_type_22(data, offset, strings)),
+        23 => Some(parse_type_23(data, offset, strings)),
+        24 => Some(parse_type_24(data, offset, strings)),
+        25 => Some(parse_type_25(data, offset, strings)),
+        26 => Some(parse_type_26(data, offset, strings)),
+        28 => Some(parse_type_28(data, offset, strings)),
+        31 => Some(parse_type_31(data, offset, strings)),
         32 => Some(parse_type_32(data, offset, strings)),
         127 => Some(parse_type_127(data, offset, strings)),
         _ => None,
     }
+}
+
+/// Parser for SMBIOS Type 10: On Board Device Information (table 2.0+ uses Type 10).
+fn parse_type_10(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x06 <= data.len() {
+        let device_type = data[offset + 0x04];
+        let description_idx = data[offset + 0x05];
+        info.push(("Device Type Raw".into(), format!("0x{:02X}", device_type)));
+        info.push((
+            "Description".into(),
+            get_string_by_index(strings, description_idx),
+        ));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 12: System Configuration Options.
+fn parse_type_12(_data: &[u8], _offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    for (i, s) in strings.iter().enumerate() {
+        info.push((format!("Option {}", i + 1), s.clone()));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 15: System Event Log.
+fn parse_type_15(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x14 <= data.len() {
+        let area_length = LittleEndian::read_u16(&data[offset + 0x04..offset + 0x06]);
+        let header_start = LittleEndian::read_u16(&data[offset + 0x06..offset + 0x08]);
+        let data_start = LittleEndian::read_u16(&data[offset + 0x08..offset + 0x0A]);
+        let access_method = data[offset + 0x0C];
+        let log_status = data[offset + 0x0D];
+        info.push(("Area Length".into(), format!("{} bytes", area_length)));
+        info.push(("Header Start Offset".into(), format!("{}", header_start)));
+        info.push(("Data Start Offset".into(), format!("{}", data_start)));
+        info.push(("Access Method".into(), format!("0x{:02X}", access_method)));
+        info.push(("Log Status".into(), format!("0x{:02X}", log_status)));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 18: 32-bit Memory Error Information.
+fn parse_type_18(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x17 <= data.len() {
+        info.push((
+            "Error Type".into(),
+            format!("0x{:02X}", data[offset + 0x04]),
+        ));
+        info.push((
+            "Error Granularity".into(),
+            format!("0x{:02X}", data[offset + 0x05]),
+        ));
+        info.push((
+            "Error Operation".into(),
+            format!("0x{:02X}", data[offset + 0x06]),
+        ));
+        info.push((
+            "Vendor Syndrome".into(),
+            format!(
+                "0x{:08X}",
+                LittleEndian::read_u32(&data[offset + 0x07..offset + 0x0B])
+            ),
+        ));
+        info.push((
+            "Memory Array Address".into(),
+            format!(
+                "0x{:08X}",
+                LittleEndian::read_u32(&data[offset + 0x0B..offset + 0x0F])
+            ),
+        ));
+        info.push((
+            "Device Address".into(),
+            format!(
+                "0x{:08X}",
+                LittleEndian::read_u32(&data[offset + 0x0F..offset + 0x13])
+            ),
+        ));
+        info.push((
+            "Resolution".into(),
+            format!(
+                "0x{:08X}",
+                LittleEndian::read_u32(&data[offset + 0x13..offset + 0x17])
+            ),
+        ));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 22: Portable Battery.
+fn parse_type_22(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x0E <= data.len() {
+        info.push((
+            "Location".into(),
+            get_string_by_index(strings, data[offset + 0x04]),
+        ));
+        info.push((
+            "Manufacturer".into(),
+            get_string_by_index(strings, data[offset + 0x05]),
+        ));
+        info.push((
+            "Manufacture Date".into(),
+            get_string_by_index(strings, data[offset + 0x06]),
+        ));
+        info.push((
+            "Serial Number".into(),
+            get_string_by_index(strings, data[offset + 0x07]),
+        ));
+        info.push((
+            "Device Name".into(),
+            get_string_by_index(strings, data[offset + 0x0A]),
+        ));
+        info.push((
+            "Device Chemistry".into(),
+            format!("0x{:02X}", data[offset + 0x0B]),
+        ));
+        info.push((
+            "Design Capacity".into(),
+            format!(
+                "{} mWh?",
+                LittleEndian::read_u16(&data[offset + 0x0C..offset + 0x0E])
+            ),
+        ));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 23: System Reset.
+fn parse_type_23(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x0D <= data.len() {
+        info.push((
+            "Reset Capabilities".into(),
+            format!("0x{:02X}", data[offset + 0x04]),
+        ));
+        info.push((
+            "Reset Count".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x05..offset + 0x07])
+            ),
+        ));
+        info.push((
+            "Reset Limit".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x07..offset + 0x09])
+            ),
+        ));
+        info.push((
+            "Timer Interval".into(),
+            format!(
+                "{} ms",
+                LittleEndian::read_u16(&data[offset + 0x09..offset + 0x0B])
+            ),
+        ));
+        info.push((
+            "Timeout".into(),
+            format!(
+                "{} ms",
+                LittleEndian::read_u16(&data[offset + 0x0B..offset + 0x0D])
+            ),
+        ));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 24: Hardware Security.
+fn parse_type_24(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x05 <= data.len() {
+        info.push((
+            "Hardware Security Settings".into(),
+            format!("0x{:02X}", data[offset + 0x04]),
+        ));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 25: System Power Controls.
+fn parse_type_25(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x09 <= data.len() {
+        info.push((
+            "Next Scheduled Power-on Month".into(),
+            format!("{}", data[offset + 0x04]),
+        ));
+        info.push(("Day".into(), format!("{}", data[offset + 0x05])));
+        info.push(("Hour".into(), format!("{}", data[offset + 0x06])));
+        info.push(("Minute".into(), format!("{}", data[offset + 0x07])));
+        info.push(("Second".into(), format!("{}", data[offset + 0x08])));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 26: Voltage Probe.
+fn parse_type_26(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x14 <= data.len() {
+        info.push((
+            "Description".into(),
+            get_string_by_index(strings, data[offset + 0x04]),
+        ));
+        info.push(("Location".into(), format!("0x{:02X}", data[offset + 0x05])));
+        info.push(("Status".into(), format!("0x{:02X}", data[offset + 0x06])));
+        info.push((
+            "Maximum Value".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x08..offset + 0x0A])
+            ),
+        ));
+        info.push((
+            "Minimum Value".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x0A..offset + 0x0C])
+            ),
+        ));
+        info.push((
+            "Resolution".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x0C..offset + 0x0E])
+            ),
+        ));
+        info.push((
+            "Tolerance".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x0E..offset + 0x10])
+            ),
+        ));
+        info.push((
+            "Accuracy".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x10..offset + 0x12])
+            ),
+        ));
+        info.push((
+            "OEM-defined".into(),
+            format!(
+                "0x{:04X}",
+                LittleEndian::read_u16(&data[offset + 0x12..offset + 0x14])
+            ),
+        ));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 28: Temperature Probe.
+fn parse_type_28(data: &[u8], offset: usize, strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x14 <= data.len() {
+        info.push((
+            "Description".into(),
+            get_string_by_index(strings, data[offset + 0x04]),
+        ));
+        info.push(("Location".into(), format!("0x{:02X}", data[offset + 0x05])));
+        info.push(("Status".into(), format!("0x{:02X}", data[offset + 0x06])));
+        info.push((
+            "Maximum Value".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x08..offset + 0x0A])
+            ),
+        ));
+        info.push((
+            "Minimum Value".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x0A..offset + 0x0C])
+            ),
+        ));
+        info.push((
+            "Resolution".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x0C..offset + 0x0E])
+            ),
+        ));
+        info.push((
+            "Tolerance".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x0E..offset + 0x10])
+            ),
+        ));
+        info.push((
+            "Accuracy".into(),
+            format!(
+                "{}",
+                LittleEndian::read_u16(&data[offset + 0x10..offset + 0x12])
+            ),
+        ));
+        info.push((
+            "OEM-defined".into(),
+            format!(
+                "0x{:04X}",
+                LittleEndian::read_u16(&data[offset + 0x12..offset + 0x14])
+            ),
+        ));
+    }
+    info
+}
+
+/// Parser for SMBIOS Type 31: Out-of-Band Remote Access.
+fn parse_type_31(data: &[u8], offset: usize, _strings: &[String]) -> Vec<(String, String)> {
+    let mut info = Vec::new();
+    if offset + 0x07 <= data.len() {
+        info.push((
+            "Manufacturer ID".into(),
+            format!("0x{:02X}", data[offset + 0x04]),
+        ));
+        info.push((
+            "Remote Access Flags".into(),
+            format!("0x{:02X}", data[offset + 0x05]),
+        ));
+        info.push((
+            "Access Info".into(),
+            format!("0x{:02X}", data[offset + 0x06]),
+        ));
+    }
+    info
 }
 
 /// Parser for SMBIOS Type 0: BIOS Information.
