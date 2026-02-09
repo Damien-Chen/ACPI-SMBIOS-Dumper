@@ -118,9 +118,23 @@ impl DumpApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Default to dark mode (persist if available)
         let mut dark_mode = cc.egui_ctx.style().visuals.dark_mode;
+        let mut sidebar_filter = String::new();
+        let mut search_query = String::new();
+        let mut active_tab = Tab::Hex;
         if let Some(storage) = cc.storage {
             if let Some(stored) = storage.get_string("ui.dark_mode") {
                 dark_mode = stored == "1";
+            }
+            if let Some(stored) = storage.get_string("ui.sidebar_filter") {
+                sidebar_filter = stored;
+            }
+            if let Some(stored) = storage.get_string("ui.search_query") {
+                search_query = stored;
+            }
+            if let Some(stored) = storage.get_string("ui.active_tab") {
+                if stored == "parsed" {
+                    active_tab = Tab::Parsed;
+                }
             }
         }
         let is_admin = unsafe { IsUserAnAdmin().as_bool() };
@@ -130,11 +144,11 @@ impl DumpApp {
             smbios_data: None,
             smbios_list: Vec::new(),
             selected_item: Selection::None,
-            active_tab: Tab::Hex,
+            active_tab,
             cached_hex: String::new(),
             cached_parsed: String::new(),
-            sidebar_filter: String::new(),
-            search_query: String::new(),
+            sidebar_filter,
+            search_query,
             search_panel_open: false,
             dark_mode,
             status: STATUS_OK.to_string(),
@@ -1146,6 +1160,15 @@ impl eframe::App for DumpApp {
                 "1".to_string()
             } else {
                 "0".to_string()
+            },
+        );
+        storage.set_string("ui.sidebar_filter", self.sidebar_filter.clone());
+        storage.set_string("ui.search_query", self.search_query.clone());
+        storage.set_string(
+            "ui.active_tab",
+            match self.active_tab {
+                Tab::Hex => "hex".to_string(),
+                Tab::Parsed => "parsed".to_string(),
             },
         );
     }
