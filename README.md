@@ -38,7 +38,6 @@ acpi-smbios-dumper.exe
 
 The application will open a window where you can browse and inspect ACPI and SMBIOS data.
 
-## Troubleshooting
+## License
 
--   **"Access Denied" or Empty Lists**: Ensure you are running as **Administrator**.
--   **Build Errors**: Ensure you have the MSVC build tools installed.
+Licensed under the [MIT License](https://opensource.org/license/mit/). You are free to use, modify, and redistribute the software with proper attribution.
